@@ -331,6 +331,22 @@ impl eframe::App for SettingsApp {
                 section(ui, "系统", |ui| {
                     draw_switch(ui, "auto_start", &mut s.auto_start, "开机自启");
                 });
+                ui.add_space(12.0);
+
+                section(ui, "全屏例外", |ui| {
+                    ui.label(
+                        egui::RichText::new("这些全屏窗口仍显示动画光标（每行一条规则）")
+                            .size(12.0)
+                            .color(MUTED),
+                    );
+                    ui.add(
+                        egui::TextEdit::multiline(&mut s.fullscreen_overlay_exclusions)
+                            .desired_rows(4)
+                            .hint_text(
+                                "exe:waterfox.exe\nclass:MyBrowserWindow\ntitle:视频播放器",
+                            ),
+                    );
+                });
             });
 
         if s != before {
@@ -393,7 +409,7 @@ fn settings_thread(rx: Receiver<UiCmd>, settings: Arc<Mutex<Settings>>, hwnd_usi
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         let native_options = eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
-                .with_inner_size([420.0, 650.0])
+                .with_inner_size([460.0, 780.0])
                 .with_title("Curosu 设置")
                 .with_resizable(false)
                 .with_minimize_button(true)

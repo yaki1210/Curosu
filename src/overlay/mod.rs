@@ -12,7 +12,7 @@ use crate::system_cursor;
 use anim::{CursorAnim, CursorGeometry};
 use render::{decode_png, Compositor, CursorTextures};
 use std::sync::{Arc, Mutex};
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, HMONITOR, MONITORINFO,
     MONITOR_DEFAULTTONEAREST,
@@ -20,6 +20,10 @@ use windows_sys::Win32::Graphics::Gdi::{
 use windows_sys::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows_sys::Win32::System::StationsAndDesktops::{
     CloseDesktop, OpenInputDesktop, DESKTOP_READOBJECTS,
+};
+use windows_sys::Win32::System::Threading::{
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows_sys::Win32::UI::HiDpi::{
     GetDpiForMonitor, SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -29,7 +33,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, FindWindowW, GetAncestor, GetClassNameW,
     GetCursorInfo, GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
-    GetWindowRect,
+    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
     IsWindowVisible, KillTimer, LoadIconW, PostQuitMessage, RegisterClassW, SetTimer, SetWindowPos,
     ShowWindow, TranslateMessage, WindowFromPoint, CS_HREDRAW, CS_VREDRAW, CURSORINFO, GA_ROOT,
     GWL_STYLE, HWND_TOPMOST, MSG, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE,
@@ -403,7 +407,11 @@ impl Overlay {
         }
         self.last_fullscreen_check_s = now;
 
-        let fullscreen = unsafe { foreground_window_covers_monitor() };
+        let fullscreen_exclusions = {
+            let settings = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+            settings.fullscreen_overlay_exclusions.clone()
+        };
+        let fullscreen = unsafe { foreground_window_covers_monitor(&fullscreen_exclusions) };
         if fullscreen && !self.suspended_for_fullscreen {
             log("fullscreen foreground entered; restoring user's system cursor");
             self.suspended_for_fullscreen = true;
@@ -804,9 +812,13 @@ fn rand_f() -> f64 {
 
 /// 返回前台窗口是否需要全屏降级。浏览器全屏视频仍由 DWM/浏览器窗口承载，
 /// 因而保留动画覆盖层；其余覆盖显示器的程序（例如游戏）则恢复系统鼠标。
-unsafe fn foreground_window_covers_monitor() -> bool {
+unsafe fn foreground_window_covers_monitor(fullscreen_exclusions: &str) -> bool {
     let hwnd = GetForegroundWindow();
-    if hwnd.is_null() || IsWindowVisible(hwnd) == 0 || is_browser_window(hwnd) {
+    if hwnd.is_null()
+        || IsWindowVisible(hwnd) == 0
+        || is_browser_window(hwnd)
+        || matches_fullscreen_exclusion(hwnd, fullscreen_exclusions)
+    {
         return false;
     }
     let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
@@ -834,15 +846,71 @@ unsafe fn foreground_window_covers_monitor() -> bool {
 /// Chromium 系浏览器共用 Chrome_WidgetWin_1；Firefox 使用 MozillaWindowClass。
 /// 这些窗口的视频全屏无需禁用 Curosu 动画覆盖层。
 unsafe fn is_browser_window(hwnd: HWND) -> bool {
+    matches!(
+        window_class_name(hwnd).as_deref(),
+        Some("Chrome_WidgetWin_1") | Some("MozillaWindowClass")
+    )
+}
+
+/// 用户可在设置中按程序名、窗口类名或标题关键字排除全屏降级。空行与未知格式
+/// 被忽略，规则比较不区分 ASCII 大小写。
+unsafe fn matches_fullscreen_exclusion(hwnd: HWND, rules: &str) -> bool {
+    if rules.trim().is_empty() {
+        return false;
+    }
+    let class_name = window_class_name(hwnd).unwrap_or_default();
+    let title = window_title(hwnd);
+    let executable = window_executable_name(hwnd).unwrap_or_default();
+
+    rules.lines().map(str::trim).filter(|rule| !rule.is_empty()).any(|rule| {
+        if let Some(value) = rule.strip_prefix("exe:") {
+            executable.eq_ignore_ascii_case(value.trim())
+        } else if let Some(value) = rule.strip_prefix("class:") {
+            class_name.eq_ignore_ascii_case(value.trim())
+        } else if let Some(value) = rule.strip_prefix("title:") {
+            title.to_lowercase().contains(&value.trim().to_lowercase())
+        } else {
+            false
+        }
+    })
+}
+
+unsafe fn window_class_name(hwnd: HWND) -> Option<String> {
     let mut class_name = [0u16; 64];
     let len = GetClassNameW(hwnd, class_name.as_mut_ptr(), class_name.len() as i32);
     if len <= 0 {
-        return false;
+        return None;
     }
-    matches!(
-        String::from_utf16_lossy(&class_name[..len as usize]).as_str(),
-        "Chrome_WidgetWin_1" | "MozillaWindowClass"
-    )
+    Some(String::from_utf16_lossy(&class_name[..len as usize]))
+}
+
+unsafe fn window_title(hwnd: HWND) -> String {
+    let mut title = [0u16; 512];
+    let len = GetWindowTextW(hwnd, title.as_mut_ptr(), title.len() as i32);
+    String::from_utf16_lossy(&title[..len.max(0) as usize])
+}
+
+unsafe fn window_executable_name(hwnd: HWND) -> Option<String> {
+    let mut process_id = 0;
+    GetWindowThreadProcessId(hwnd, &mut process_id);
+    if process_id == 0 {
+        return None;
+    }
+    let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id);
+    if process.is_null() {
+        return None;
+    }
+
+    let mut path = [0u16; 1024];
+    let mut len = path.len() as u32;
+    let queried = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, path.as_mut_ptr(), &mut len);
+    CloseHandle(process);
+    if queried == 0 || len == 0 {
+        return None;
+    }
+    std::path::Path::new(&String::from_utf16_lossy(&path[..len as usize]))
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
 }
 
 /// DWM 缩略图窗口不是稳定的可枚举 Win32 窗口。基于稳定的 Shell 任务栏矩形，
