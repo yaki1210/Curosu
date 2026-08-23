@@ -5,8 +5,8 @@ use crate::log::log;
 use std::ffi::c_void;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CopyIcon, CreateCursor, DestroyCursor, LoadCursorW, SetSystemCursor, SystemParametersInfoW,
-    SPIF_SENDCHANGE, SPI_SETCURSORS,
+    CopyIcon, CreateCursor, DestroyCursor, LoadCursorW, LoadImageW, SetSystemCursor,
+    SystemParametersInfoW, IMAGE_CURSOR, LR_DEFAULTCOLOR, SPIF_SENDCHANGE, SPI_SETCURSORS,
 };
 
 /// 标准光标 ID（与 C# OCR_* 常量一致）。
@@ -97,16 +97,22 @@ pub fn install() -> bool {
 
 /// 覆盖层无法绘制的位置（例如 UAC 安全桌面或 DWM 任务栏缩略图）使用的
 /// 静态光标。它只替换当前会话的系统光标，调用 `restore` 后会重新载入用户
-/// 原来的鼠标方案。
-pub fn install_static_fallback() -> bool {
+/// 原来的鼠标方案。资源按覆盖层当前的物理像素宽度加载，保证 UAC 时的
+/// 临时指针尺寸与设置中的光标大小一致。
+pub fn install_static_fallback(cursor_width_px: f64) -> bool {
     unsafe {
         let hinst = GetModuleHandleW(std::ptr::null());
-        let source = LoadCursorW(
+        let size = cursor_width_px.round().clamp(16.0, 64.0) as i32;
+        let source = LoadImageW(
             hinst,
             UAC_FALLBACK_CURSOR_RESOURCE_ID as usize as *const u16,
+            IMAGE_CURSOR,
+            size,
+            size,
+            LR_DEFAULTCOLOR,
         );
         if source.is_null() {
-            log("LoadCursorW failed for static fallback cursor");
+            log(&format!("LoadImageW failed for static fallback cursor size={size}"));
             return false;
         }
 
@@ -129,8 +135,9 @@ pub fn install_static_fallback() -> bool {
                 installed_normal = true;
             }
         }
+        DestroyCursor(source);
         log(&format!(
-            "system_cursor::install_static_fallback installed={installed_normal}"
+            "system_cursor::install_static_fallback installed={installed_normal} size={size}"
         ));
         UAC_FALLBACK_INSTALLED = installed_normal;
         installed_normal

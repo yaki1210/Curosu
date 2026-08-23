@@ -378,7 +378,7 @@ impl Overlay {
             self.suspended_for_fullscreen = false;
             self.suspended_for_taskbar_preview = false;
             system_cursor::restore();
-            if !system_cursor::install_static_fallback() {
+            if !system_cursor::install_static_fallback(self.geom.cursor_width * self.dpi_scale) {
                 log("UAC fallback cursor installation failed; using the user's cursor scheme");
             }
             unsafe { ShowWindow(self.hwnd, SW_HIDE) };
