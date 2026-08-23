@@ -34,30 +34,67 @@ const SLIDER_HIGHLIGHT: egui::Color32 = egui::Color32::from_rgb(255, 151, 212);
 /// 下拉列表滚动条的灰紫把手，贴近 osu! 的宽胶囊形滚动条。
 const SCROLL_HANDLE: egui::Color32 = egui::Color32::from_rgb(185, 179, 197);
 
-/// 加载中文字体（Microsoft YaHei）注入 egui。
+/// 使用系统安装的 Torus 作为拉丁文字体，并以微软雅黑补齐中文字符。
+/// osu! 资源目录内的 Torus `.bin` 是位图字形数据，不是 egui 所需的 OpenType
+/// 字体；系统安装的同款 OTF 可直接加载，也避免把商业字体重新分发到安装包中。
 fn setup_fonts(ctx: &egui::Context) {
-    let candidates = [
+    let torus_candidates = [
+        r"C:\Windows\Fonts\Torus-Regular.otf",
+        r"C:\Windows\Fonts\Torus-SemiBold.otf",
+    ];
+    let yahei_candidates = [
         r"C:\Windows\Fonts\msyh.ttc",
         r"C:\Windows\Fonts\msyh.ttf",
         r"C:\Windows\Fonts\msyhbd.ttc",
     ];
-    for path in candidates.iter() {
+
+    let mut fonts = egui::FontDefinitions::default();
+    let mut has_torus = false;
+    let mut has_yahei = false;
+
+    for path in torus_candidates {
         if let Ok(bytes) = std::fs::read(path) {
-            let mut fonts = egui::FontDefinitions::default();
+            fonts
+                .font_data
+                .insert("torus".to_owned(), egui::FontData::from_owned(bytes));
+            has_torus = true;
+            break;
+        }
+    }
+    for path in yahei_candidates {
+        if let Ok(bytes) = std::fs::read(path) {
             fonts
                 .font_data
                 .insert("msyh".to_owned(), egui::FontData::from_owned(bytes));
-            if let Some(f) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-                f.insert(0, "msyh".to_owned());
-            }
-            if let Some(f) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-                f.push("msyh".to_owned());
-            }
-            ctx.set_fonts(fonts);
-            return;
+            has_yahei = true;
+            break;
         }
     }
-    log("settings_ui: no CJK font found, using default");
+
+    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        if has_yahei {
+            family.insert(0, "msyh".to_owned());
+        }
+        if has_torus {
+            family.insert(0, "torus".to_owned());
+        }
+    }
+    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+        if has_yahei {
+            family.insert(0, "msyh".to_owned());
+        }
+        if has_torus {
+            family.insert(0, "torus".to_owned());
+        }
+    }
+
+    ctx.set_fonts(fonts);
+    match (has_torus, has_yahei) {
+        (true, true) => log("settings_ui: loaded Torus with Microsoft YaHei fallback"),
+        (true, false) => log("settings_ui: loaded Torus; Microsoft YaHei fallback unavailable"),
+        (false, true) => log("settings_ui: Torus unavailable; using Microsoft YaHei"),
+        (false, false) => log("settings_ui: no custom UI font found, using default"),
+    }
 }
 
 fn setup_style(ctx: &egui::Context) {
