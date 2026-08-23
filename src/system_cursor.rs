@@ -95,9 +95,10 @@ pub fn install() -> bool {
     }
 }
 
-/// UAC 安全桌面期间使用的静态光标。它只替换当前会话的系统光标，调用
-/// `restore` 后会重新载入用户原来的鼠标方案。
-pub fn install_uac_fallback() -> bool {
+/// 覆盖层无法绘制的位置（例如 UAC 安全桌面或 DWM 任务栏缩略图）使用的
+/// 静态光标。它只替换当前会话的系统光标，调用 `restore` 后会重新载入用户
+/// 原来的鼠标方案。
+pub fn install_static_fallback() -> bool {
     unsafe {
         let hinst = GetModuleHandleW(std::ptr::null());
         let source = LoadCursorW(
@@ -105,7 +106,7 @@ pub fn install_uac_fallback() -> bool {
             UAC_FALLBACK_CURSOR_RESOURCE_ID as usize as *const u16,
         );
         if source.is_null() {
-            log("LoadCursorW failed for UAC fallback cursor");
+            log("LoadCursorW failed for static fallback cursor");
             return false;
         }
 
@@ -114,11 +115,13 @@ pub fn install_uac_fallback() -> bool {
             // SetSystemCursor 会销毁传入的句柄，资源句柄必须先复制。
             let cursor = CopyIcon(source);
             if cursor.is_null() {
-                log(&format!("CopyIcon failed for UAC fallback id={id}"));
+                log(&format!("CopyIcon failed for static fallback id={id}"));
                 continue;
             }
             if SetSystemCursor(cursor, id) == 0 {
-                log(&format!("SetSystemCursor failed for UAC fallback id={id}"));
+                log(&format!(
+                    "SetSystemCursor failed for static fallback id={id}"
+                ));
                 DestroyCursor(cursor);
                 continue;
             }
@@ -126,7 +129,9 @@ pub fn install_uac_fallback() -> bool {
                 installed_normal = true;
             }
         }
-        log(&format!("system_cursor::install_uac_fallback installed={installed_normal}"));
+        log(&format!(
+            "system_cursor::install_static_fallback installed={installed_normal}"
+        ));
         UAC_FALLBACK_INSTALLED = installed_normal;
         installed_normal
     }

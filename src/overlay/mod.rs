@@ -29,10 +29,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, GetWindowRect, IsWindowVisible, KillTimer, LoadIconW, PostQuitMessage,
     RegisterClassW, SetTimer, SetWindowPos, ShowWindow, TranslateMessage, WindowFromPoint,
     CS_HREDRAW, CS_VREDRAW, CURSORINFO, GA_ROOT, GWL_STYLE, GW_HWNDNEXT, HWND_TOPMOST, MSG,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE, WM_APP,
-    WM_CONTEXTMENU, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_LBUTTONUP, WM_PAINT, WM_RBUTTONUP,
-    WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE, WM_APP, WM_CONTEXTMENU, WM_CREATE,
+    WM_DESTROY, WM_DPICHANGED, WM_LBUTTONUP, WM_PAINT, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 const CURSOR_PNG: &[u8] = include_bytes!("../../assets/cursor.png");
@@ -59,6 +58,7 @@ struct Overlay {
 
     cursor_enabled: bool,
     suspended_for_secure_desktop: bool,
+    suspended_for_taskbar_preview: bool,
     last_input_desktop_check_s: f64,
     force_topmost: bool,
     dpi_scale: f64,
@@ -74,7 +74,6 @@ struct Overlay {
     last_window: (i32, i32, i32, i32),
     last_foreground: HWND,
     last_z_order_refresh_s: f64,
-    last_preview_refresh_s: f64,
     frame_ready: bool,
     mouse_hook_active: bool,
     hook_events: u64,
@@ -229,6 +228,7 @@ pub fn run(settings: Arc<Mutex<Settings>>, tap: TapPlayer, hover: TapPlayer) {
             hover,
             cursor_enabled: true,
             suspended_for_secure_desktop: false,
+            suspended_for_taskbar_preview: false,
             last_input_desktop_check_s: f64::NEG_INFINITY,
             force_topmost: true,
             dpi_scale: 1.0,
@@ -244,7 +244,6 @@ pub fn run(settings: Arc<Mutex<Settings>>, tap: TapPlayer, hover: TapPlayer) {
             last_window: (i32::MIN, i32::MIN, 0, 0),
             last_foreground: std::ptr::null_mut(),
             last_z_order_refresh_s: f64::NEG_INFINITY,
-            last_preview_refresh_s: f64::NEG_INFINITY,
             frame_ready: false,
             mouse_hook_active: false,
             hook_events: 0,
@@ -303,6 +302,10 @@ impl Overlay {
         if self.suspended_for_secure_desktop {
             return;
         }
+        self.update_taskbar_preview_state();
+        if self.suspended_for_taskbar_preview {
+            return;
+        }
         let mut dt = now - self.last_frame_time;
         self.last_frame_time = now;
         if dt <= 0.0 || dt > 0.1 {
@@ -355,8 +358,9 @@ impl Overlay {
         if !input_desktop_available && !self.suspended_for_secure_desktop {
             log("secure desktop entered; switching to static fallback cursor");
             self.suspended_for_secure_desktop = true;
+            self.suspended_for_taskbar_preview = false;
             system_cursor::restore();
-            if !system_cursor::install_uac_fallback() {
+            if !system_cursor::install_static_fallback() {
                 log("UAC fallback cursor installation failed; using the user's cursor scheme");
             }
             unsafe { ShowWindow(self.hwnd, SW_HIDE) };
@@ -372,6 +376,32 @@ impl Overlay {
                 unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
             } else {
                 // 如果恢复失败，保持普通系统光标，避免再次出现无鼠标的状态。
+                self.cursor_enabled = false;
+            }
+        }
+    }
+
+    /// DWM 的任务栏缩略图不和普通桌面窗口共享可控的 Z 序，因此覆盖层会被
+    /// 它遮住。光标位于缩略图时临时改用系统原生静态 .cur；离开后恢复动画。
+    fn update_taskbar_preview_state(&mut self) {
+        let over_preview = unsafe { is_pointer_over_taskbar_thumbnail() };
+        if over_preview && !self.suspended_for_taskbar_preview {
+            log("taskbar thumbnail entered; switching to static fallback cursor");
+            self.suspended_for_taskbar_preview = true;
+            system_cursor::restore();
+            if !system_cursor::install_static_fallback() {
+                log("taskbar fallback cursor installation failed; using the user's cursor scheme");
+            }
+            unsafe { ShowWindow(self.hwnd, SW_HIDE) };
+        } else if !over_preview && self.suspended_for_taskbar_preview {
+            log("taskbar thumbnail left; restoring cursor overlay");
+            self.suspended_for_taskbar_preview = false;
+            system_cursor::restore();
+            if system_cursor::install() {
+                self.force_topmost = true;
+                self.frame_ready = false;
+                unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
+            } else {
                 self.cursor_enabled = false;
             }
         }
@@ -649,61 +679,6 @@ impl Overlay {
             self.compositor.present(self.hwnd);
             self.frame_ready = true;
         }
-        self.try_bring_above_taskbar_preview(now);
-    }
-
-    fn try_bring_above_taskbar_preview(&mut self, now: f64) {
-        // 节流到 250ms：原版 C# 用 250ms 定时器调用，而这里每帧（8ms）调用时，
-        // 命中缩略图会每帧 SetWindowPos 插入其上方，与 DWM 实时预览互相拉扯，
-        // 造成卡顿且遮挡不稳定。
-        if now - self.last_preview_refresh_s < 0.25 {
-            return;
-        }
-        self.last_preview_refresh_s = now;
-        unsafe {
-            let (cx, cy) = hook::cursor_pos();
-            let preview = WindowFromPoint(windows_sys::Win32::Foundation::POINT { x: cx, y: cy });
-            let root = if preview.is_null() {
-                std::ptr::null_mut()
-            } else {
-                GetAncestor(preview, GA_ROOT)
-            };
-            if is_task_list_thumbnail(root) {
-                SetWindowPos(
-                    self.hwnd,
-                    root,
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                );
-                return;
-            }
-            let name: Vec<u16> = "TaskListThumbnailWnd\0".encode_utf16().collect();
-            let mut found = FindWindowW(name.as_ptr(), std::ptr::null());
-            while !found.is_null() {
-                let mut rect: windows_sys::Win32::Foundation::RECT = std::mem::zeroed();
-                if GetWindowRect(found, &mut rect) != 0
-                    && cx >= rect.left
-                    && cx < rect.right
-                    && cy >= rect.top
-                    && cy < rect.bottom
-                {
-                    SetWindowPos(
-                        self.hwnd,
-                        found,
-                        0,
-                        0,
-                        0,
-                        0,
-                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                    );
-                    return;
-                }
-                found = GetWindow(found, GW_HWNDNEXT);
-            }
-        }
     }
 
     fn toggle_enabled(&mut self, enabled: bool) {
@@ -726,6 +701,7 @@ impl Overlay {
             unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
         } else {
             self.suspended_for_secure_desktop = false;
+            self.suspended_for_taskbar_preview = false;
             hook::uninstall();
             self.mouse_hook_active = false;
             system_cursor::restore();
@@ -789,4 +765,29 @@ unsafe fn is_task_list_thumbnail(hwnd: HWND) -> bool {
     let n = GetClassNameW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
     let name = String::from_utf16_lossy(&buf[..n as usize]);
     name == "TaskListThumbnailWnd"
+}
+
+unsafe fn is_pointer_over_taskbar_thumbnail() -> bool {
+    let (cx, cy) = hook::cursor_pos();
+    let point = windows_sys::Win32::Foundation::POINT { x: cx, y: cy };
+    let window = WindowFromPoint(point);
+    if is_task_list_thumbnail(GetAncestor(window, GA_ROOT)) {
+        return true;
+    }
+
+    let name: Vec<u16> = "TaskListThumbnailWnd\0".encode_utf16().collect();
+    let mut preview = FindWindowW(name.as_ptr(), std::ptr::null());
+    while !preview.is_null() {
+        let mut rect: windows_sys::Win32::Foundation::RECT = std::mem::zeroed();
+        if GetWindowRect(preview, &mut rect) != 0
+            && cx >= rect.left
+            && cx < rect.right
+            && cy >= rect.top
+            && cy < rect.bottom
+        {
+            return true;
+        }
+        preview = GetWindow(preview, GW_HWNDNEXT);
+    }
+    false
 }
