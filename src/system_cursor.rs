@@ -3,9 +3,10 @@
 
 use crate::log::log;
 use std::ffi::c_void;
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CopyIcon, CreateCursor, DestroyCursor, LoadCursorW, SetSystemCursor, SystemParametersInfoW,
-    SPIF_SENDCHANGE, SPI_SETCURSORS,
+    CopyIcon, CreateCursor, DestroyCursor, LoadCursorW, LoadImageW, SetSystemCursor,
+    SystemParametersInfoW, IMAGE_CURSOR, LR_DEFAULTCOLOR, SPIF_SENDCHANGE, SPI_SETCURSORS,
 };
 
 /// 标准光标 ID（与 C# OCR_* 常量一致）。
@@ -41,8 +42,11 @@ const CURSOR_IDS: [u32; 14] = [
     OCR_HELP,
 ];
 
+const UAC_FALLBACK_CURSOR_RESOURCE_ID: u16 = 2;
+
 static mut BLANK_HANDLES: [*mut c_void; 14] = [std::ptr::null_mut(); 14];
 static mut INSTALLED: bool = false;
+static mut UAC_FALLBACK_INSTALLED: bool = false;
 
 /// 已替换的空白光标句柄是否包含指定 id。
 pub fn get_blank_handle(cursor_id: u32) -> *mut c_void {
@@ -75,7 +79,9 @@ pub fn install() -> bool {
                 continue;
             }
             log(&format!("Hidden system cursor id={id}"));
-            BLANK_HANDLES[i] = blank;
+            // SetSystemCursor 成功后会销毁 blank；重新取得共享系统句柄，
+            // 供 GetCursorInfo 的悬停判断使用，不能保存已销毁的 blank。
+            BLANK_HANDLES[i] = LoadCursorW(std::ptr::null_mut(), *id as *const u16);
             if *id == OCR_NORMAL {
                 installed_any = true;
             }
@@ -89,10 +95,59 @@ pub fn install() -> bool {
     }
 }
 
+/// 覆盖层无法绘制的位置（例如 UAC 安全桌面或 DWM 任务栏缩略图）使用的
+/// 静态光标。它只替换当前会话的系统光标，调用 `restore` 后会重新载入用户
+/// 原来的鼠标方案。资源按覆盖层当前的物理像素宽度加载，保证 UAC 时的
+/// 临时指针尺寸与设置中的光标大小一致。
+pub fn install_static_fallback(cursor_width_px: f64) -> bool {
+    unsafe {
+        let hinst = GetModuleHandleW(std::ptr::null());
+        let size = cursor_width_px.round().clamp(16.0, 64.0) as i32;
+        let source = LoadImageW(
+            hinst,
+            UAC_FALLBACK_CURSOR_RESOURCE_ID as usize as *const u16,
+            IMAGE_CURSOR,
+            size,
+            size,
+            LR_DEFAULTCOLOR,
+        );
+        if source.is_null() {
+            log(&format!("LoadImageW failed for static fallback cursor size={size}"));
+            return false;
+        }
+
+        let mut installed_normal = false;
+        for id in CURSOR_IDS {
+            // SetSystemCursor 会销毁传入的句柄，资源句柄必须先复制。
+            let cursor = CopyIcon(source);
+            if cursor.is_null() {
+                log(&format!("CopyIcon failed for static fallback id={id}"));
+                continue;
+            }
+            if SetSystemCursor(cursor, id) == 0 {
+                log(&format!(
+                    "SetSystemCursor failed for static fallback id={id}"
+                ));
+                DestroyCursor(cursor);
+                continue;
+            }
+            if id == OCR_NORMAL {
+                installed_normal = true;
+            }
+        }
+        DestroyCursor(source);
+        log(&format!(
+            "system_cursor::install_static_fallback installed={installed_normal} size={size}"
+        ));
+        UAC_FALLBACK_INSTALLED = installed_normal;
+        installed_normal
+    }
+}
+
 /// 恢复系统光标。
 pub fn restore() {
     unsafe {
-        if !INSTALLED {
+        if !INSTALLED && !UAC_FALLBACK_INSTALLED {
             return;
         }
         let restored =
@@ -102,12 +157,10 @@ pub fn restore() {
             restore_default_cursors();
         }
         for h in BLANK_HANDLES.iter_mut() {
-            if !h.is_null() {
-                DestroyCursor(*h);
-                *h = std::ptr::null_mut();
-            }
+            *h = std::ptr::null_mut();
         }
         INSTALLED = false;
+        UAC_FALLBACK_INSTALLED = false;
     }
 }
 

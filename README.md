@@ -66,6 +66,9 @@ GitHub Actions 会在推送到 `main` 时构建 artifact，并在推送 `v*` tag
 | `hover_sound_volume` | 悬停音量（0–1） | `1.0` |
 | `hover_sound_as_resize_prompt` | 窗口拉伸时播放悬停音效 | `false` |
 | `auto_start` | 开机自启 | `false` |
+| `fullscreen_overlay_exclusion_executables` | 设置窗口中选择的全屏例外程序 | 空 |
+
+在“全屏例外”中刷新当前窗口列表，选择程序后点击“添加”。该程序全屏时会继续显示动画光标。
 
 ## 技术实现
 

@@ -16,6 +16,12 @@ pub struct Settings {
     pub hover_sound_enabled: bool,
     pub hover_sound_volume: f64,
     pub hover_sound_as_resize_prompt: bool,
+    /// 全屏时仍保留动画覆盖层的窗口规则，每行一条。
+    #[serde(default)]
+    pub fullscreen_overlay_exclusions: String,
+    /// 用户从设置窗口选择的程序名；全屏时保留动画覆盖层。
+    #[serde(default)]
+    pub fullscreen_overlay_exclusion_executables: Vec<String>,
 }
 
 impl Default for Settings {
@@ -28,6 +34,8 @@ impl Default for Settings {
             hover_sound_enabled: true,
             hover_sound_volume: 1.0,
             hover_sound_as_resize_prompt: false,
+            fullscreen_overlay_exclusions: String::new(),
+            fullscreen_overlay_exclusion_executables: Vec::new(),
         }
     }
 }
@@ -76,5 +84,29 @@ impl Settings {
         if let Ok(json) = serde_json::to_string_pretty(self) {
             let _ = std::fs::write(path, json);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Settings;
+
+    #[test]
+    fn legacy_settings_default_the_fullscreen_exclusions() {
+        let settings: Settings = serde_json::from_str(
+            r#"{
+                "cursor_width": 30.0,
+                "auto_start": false,
+                "tap_sound_enabled": true,
+                "tap_sound_volume": 1.0,
+                "hover_sound_enabled": true,
+                "hover_sound_volume": 1.0,
+                "hover_sound_as_resize_prompt": false
+            }"#,
+        )
+        .expect("legacy settings should deserialize");
+
+        assert!(settings.fullscreen_overlay_exclusions.is_empty());
+        assert!(settings.fullscreen_overlay_exclusion_executables.is_empty());
     }
 }

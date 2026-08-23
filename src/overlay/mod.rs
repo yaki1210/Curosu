@@ -12,24 +12,34 @@ use crate::system_cursor;
 use anim::{CursorAnim, CursorGeometry};
 use render::{decode_png, Compositor, CursorTextures};
 use std::sync::{Arc, Mutex};
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows_sys::Win32::Graphics::Gdi::{MonitorFromPoint, HMONITOR, MONITOR_DEFAULTTONEAREST};
+use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM, LRESULT, WPARAM};
+use windows_sys::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, HMONITOR, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST,
+};
 use windows_sys::Win32::Media::{timeBeginPeriod, timeEndPeriod};
+use windows_sys::Win32::System::StationsAndDesktops::{
+    CloseDesktop, OpenInputDesktop, DESKTOP_READOBJECTS,
+};
+use windows_sys::Win32::System::Threading::{
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows_sys::Win32::UI::HiDpi::{
     GetDpiForMonitor, SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     MDT_EFFECTIVE_DPI,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, FindWindowW, GetAncestor, GetClassNameW,
-    GetCursorInfo, GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindow,
-    GetWindowLongPtrW, GetWindowRect, IsWindowVisible, KillTimer, LoadIconW, PostQuitMessage,
-    RegisterClassW, SetTimer, SetWindowPos, ShowWindow, TranslateMessage, WindowFromPoint,
-    CS_HREDRAW, CS_VREDRAW, CURSORINFO, GA_ROOT, GWL_STYLE, GW_HWNDNEXT, HWND_TOPMOST, MSG,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE, WM_APP,
-    WM_CONTEXTMENU, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_LBUTTONUP, WM_PAINT, WM_RBUTTONUP,
-    WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetAncestor, GetClassNameW,
+    GetCursorInfo, GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
+    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
+    IsWindowVisible, KillTimer, LoadIconW, PostQuitMessage, RegisterClassW, SetTimer, SetWindowPos,
+    ShowWindow, TranslateMessage, WindowFromPoint, CS_HREDRAW, CS_VREDRAW, CURSORINFO, GA_ROOT,
+    GWL_STYLE, HWND_TOPMOST, MSG, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE,
+    WM_APP, WM_CONTEXTMENU, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_LBUTTONUP, WM_PAINT,
+    WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 const CURSOR_PNG: &[u8] = include_bytes!("../../assets/cursor.png");
@@ -42,6 +52,8 @@ pub const MSG_EXIT: u32 = WM_APP + 3;
 pub const MSG_SETTINGS_CHANGED: u32 = WM_APP + 4;
 
 const FRAME_MS: u32 = 8;
+const INPUT_DESKTOP_CHECK_INTERVAL_S: f64 = 0.25;
+const FULLSCREEN_CHECK_INTERVAL_S: f64 = 0.25;
 
 struct Overlay {
     hwnd: HWND,
@@ -54,6 +66,11 @@ struct Overlay {
     hover: TapPlayer,
 
     cursor_enabled: bool,
+    suspended_for_secure_desktop: bool,
+    suspended_for_fullscreen: bool,
+    suspended_for_taskbar_preview: bool,
+    last_input_desktop_check_s: f64,
+    last_fullscreen_check_s: f64,
     force_topmost: bool,
     dpi_scale: f64,
     dpi_monitor: HMONITOR,
@@ -68,7 +85,6 @@ struct Overlay {
     last_window: (i32, i32, i32, i32),
     last_foreground: HWND,
     last_z_order_refresh_s: f64,
-    last_preview_refresh_s: f64,
     frame_ready: bool,
     mouse_hook_active: bool,
     hook_events: u64,
@@ -222,6 +238,11 @@ pub fn run(settings: Arc<Mutex<Settings>>, tap: TapPlayer, hover: TapPlayer) {
             tap,
             hover,
             cursor_enabled: true,
+            suspended_for_secure_desktop: false,
+            suspended_for_fullscreen: false,
+            suspended_for_taskbar_preview: false,
+            last_input_desktop_check_s: f64::NEG_INFINITY,
+            last_fullscreen_check_s: f64::NEG_INFINITY,
             force_topmost: true,
             dpi_scale: 1.0,
             dpi_monitor: std::ptr::null_mut(),
@@ -236,7 +257,6 @@ pub fn run(settings: Arc<Mutex<Settings>>, tap: TapPlayer, hover: TapPlayer) {
             last_window: (i32::MIN, i32::MIN, 0, 0),
             last_foreground: std::ptr::null_mut(),
             last_z_order_refresh_s: f64::NEG_INFINITY,
-            last_preview_refresh_s: f64::NEG_INFINITY,
             frame_ready: false,
             mouse_hook_active: false,
             hook_events: 0,
@@ -291,6 +311,18 @@ impl Overlay {
             return;
         }
         let now = now_seconds();
+        self.update_secure_desktop_state(now);
+        if self.suspended_for_secure_desktop {
+            return;
+        }
+        self.update_fullscreen_state(now);
+        if self.suspended_for_fullscreen {
+            return;
+        }
+        self.update_taskbar_preview_state();
+        if self.suspended_for_taskbar_preview {
+            return;
+        }
         let mut dt = now - self.last_frame_time;
         self.last_frame_time = now;
         if dt <= 0.0 || dt > 0.1 {
@@ -320,6 +352,115 @@ impl Overlay {
         let previous_anim = self.anim;
         self.anim.update(dt, dx as f64, dy as f64);
         self.render_frame(self.anim.visual_changed_from(&previous_anim), now);
+    }
+
+    /// UAC 默认切换到 Winlogon 安全桌面；普通进程不能访问该桌面，覆盖层也
+    /// 无法绘制。此时必须还原全局系统光标，否则安全桌面会没有可见鼠标。
+    fn update_secure_desktop_state(&mut self, now: f64) {
+        if now - self.last_input_desktop_check_s < INPUT_DESKTOP_CHECK_INTERVAL_S {
+            return;
+        }
+        self.last_input_desktop_check_s = now;
+
+        let input_desktop_available = unsafe {
+            let desktop = OpenInputDesktop(0, 0, DESKTOP_READOBJECTS);
+            if desktop.is_null() {
+                false
+            } else {
+                CloseDesktop(desktop);
+                true
+            }
+        };
+
+        if !input_desktop_available && !self.suspended_for_secure_desktop {
+            log("secure desktop entered; switching to static fallback cursor");
+            self.suspended_for_secure_desktop = true;
+            self.suspended_for_fullscreen = false;
+            self.suspended_for_taskbar_preview = false;
+            system_cursor::restore();
+            if !system_cursor::install_static_fallback(self.geom.cursor_width * self.dpi_scale) {
+                log("UAC fallback cursor installation failed; using the user's cursor scheme");
+            }
+            unsafe { ShowWindow(self.hwnd, SW_HIDE) };
+        } else if input_desktop_available && self.suspended_for_secure_desktop {
+            log("secure desktop left; restoring cursor overlay");
+            self.suspended_for_secure_desktop = false;
+            // 移除仅在 UAC 期间使用的静态 .cur，再恢复原有动画覆盖层。
+            system_cursor::restore();
+            if system_cursor::install() {
+                hook::init_position();
+                self.force_topmost = true;
+                self.frame_ready = false;
+                unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
+            } else {
+                // 如果恢复失败，保持普通系统光标，避免再次出现无鼠标的状态。
+                self.cursor_enabled = false;
+            }
+        }
+    }
+
+    /// 真正独占全屏可绕过 DWM 合成，桌面覆盖层不保证能显示。检测到前台窗口覆盖
+    /// 整个显示器时，停止覆盖层并还原用户原来的鼠标方案；退出全屏后恢复动画。
+    fn update_fullscreen_state(&mut self, now: f64) {
+        if now - self.last_fullscreen_check_s < FULLSCREEN_CHECK_INTERVAL_S {
+            return;
+        }
+        self.last_fullscreen_check_s = now;
+
+        let (fullscreen_exclusions, fullscreen_exclusion_executables) = {
+            let settings = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                settings.fullscreen_overlay_exclusions.clone(),
+                settings.fullscreen_overlay_exclusion_executables.clone(),
+            )
+        };
+        let fullscreen = unsafe {
+            foreground_window_covers_monitor(
+                &fullscreen_exclusions,
+                &fullscreen_exclusion_executables,
+            )
+        };
+        if fullscreen && !self.suspended_for_fullscreen {
+            log("fullscreen foreground entered; restoring user's system cursor");
+            self.suspended_for_fullscreen = true;
+            self.suspended_for_taskbar_preview = false;
+            system_cursor::restore();
+            unsafe { ShowWindow(self.hwnd, SW_HIDE) };
+        } else if !fullscreen && self.suspended_for_fullscreen {
+            log("fullscreen foreground left; restoring cursor overlay");
+            self.suspended_for_fullscreen = false;
+            if system_cursor::install() {
+                hook::init_position();
+                self.force_topmost = true;
+                self.frame_ready = false;
+                unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
+            } else {
+                self.cursor_enabled = false;
+            }
+        }
+    }
+
+    /// 仅在鼠标实际命中 DWM 任务栏缩略图窗口时隐藏覆盖层。任务栏本体仍保留
+    /// 动画覆盖层；缩略图中则恢复用户自己的默认系统光标。
+    fn update_taskbar_preview_state(&mut self) {
+        let over_preview = unsafe { is_cursor_over_taskbar_preview_window() };
+        if over_preview && !self.suspended_for_taskbar_preview {
+            log("taskbar thumbnail entered; restoring user's system cursor");
+            self.suspended_for_taskbar_preview = true;
+            system_cursor::restore();
+            unsafe { ShowWindow(self.hwnd, SW_HIDE) };
+        } else if !over_preview && self.suspended_for_taskbar_preview {
+            log("taskbar thumbnail left; restoring cursor overlay");
+            self.suspended_for_taskbar_preview = false;
+            system_cursor::restore();
+            if system_cursor::install() {
+                self.force_topmost = true;
+                self.frame_ready = false;
+                unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
+            } else {
+                self.cursor_enabled = false;
+            }
+        }
     }
 
     /// 按光标所在显示器求有效 DPI，按 HMONITOR 缓存。
@@ -450,12 +591,17 @@ impl Overlay {
         let pointer_hover = !info.hCursor.is_null() && info.hCursor == hand_handle;
         self.anim.pointer_hover = pointer_hover;
 
+        // 只有系统明确给出调整大小光标，且鼠标确实位于可缩放窗口的边框时，
+        // 才覆盖静止朝向。左键按下后立刻交还给原有按下/拖动旋转逻辑。
+        let resize_angle = self.resize_cursor_angle(info.hCursor, info.ptScreenPos.x, info.ptScreenPos.y);
+        self.anim.resize_angle = if self.anim.mouse_down { None } else { resize_angle };
+
         let resize_prompt_mode = {
             let g = self.settings.lock().unwrap_or_else(|e| e.into_inner());
             g.hover_sound_as_resize_prompt
         };
         if resize_prompt_mode {
-            let resize = self.is_resize_cursor(info.ptScreenPos.x, info.ptScreenPos.y);
+            let resize = resize_angle.is_some();
             if resize && !self.was_resize_prompt && !self.anim.mouse_down {
                 self.play_hover();
             }
@@ -486,32 +632,82 @@ impl Overlay {
         }
     }
 
-    fn is_resize_cursor(&self, px: i32, py: i32) -> bool {
+    /// 依据真实窗口边框返回指向窗口内部的箭头角度。默认光标视觉上从向上
+    /// 向左偏 24°，即屏幕坐标的 -114°；旋转角度须为“目标方向 - 默认方向”。
+    fn resize_cursor_angle(
+        &self,
+        cursor_handle: *mut core::ffi::c_void,
+        px: i32,
+        py: i32,
+    ) -> Option<f64> {
+        let is_resize_handle = [
+            system_cursor::OCR_SIZEWE,
+            system_cursor::OCR_SIZENS,
+            system_cursor::OCR_SIZENWSE,
+            system_cursor::OCR_SIZENESW,
+        ]
+        .into_iter()
+        .any(|id| {
+            let handle = system_cursor::get_blank_handle(id);
+            !handle.is_null() && cursor_handle == handle
+        });
+        if !is_resize_handle {
+            return None;
+        }
+
         unsafe {
             let window = WindowFromPoint(windows_sys::Win32::Foundation::POINT { x: px, y: py });
             if window.is_null() {
-                return false;
+                return None;
             }
             let root = GetAncestor(window, GA_ROOT);
             if root.is_null() || root == self.hwnd {
-                return false;
+                return None;
             }
             let style = GetWindowLongPtrW(root, GWL_STYLE);
             let ws_maximize: isize = 0x01000000;
             let ws_thickframe: isize = 0x00040000;
             if (style & ws_maximize) != 0 || (style & ws_thickframe) == 0 {
-                return false;
+                return None;
             }
             let mut rect: windows_sys::Win32::Foundation::RECT = std::mem::zeroed();
             if GetWindowRect(root, &mut rect) == 0 {
-                return false;
+                return None;
             }
             let border_x = GetSystemMetrics(32).max(1);
             let border_y = GetSystemMetrics(33).max(1);
-            px <= rect.left + border_x
-                || px >= rect.right - border_x
-                || py <= rect.top + border_y
-                || py >= rect.bottom - border_y
+            let left = px <= rect.left + border_x;
+            let right = px >= rect.right - border_x;
+            let top = py <= rect.top + border_y;
+            let bottom = py >= rect.bottom - border_y;
+
+            // 旋转坐标系的正方向在屏幕坐标中为顺时针。资源的默认主轴为
+            // 左上 24°（相对向上向左偏 24°），不是 0° 或 45°。
+            const DEFAULT_CURSOR_DIRECTION_DEG: f64 = -114.0;
+            let target_direction = if left && top {
+                // 左上角 -> 右下。
+                45.0
+            } else if right && top {
+                // 右上角 -> 左下。
+                135.0
+            } else if left && bottom {
+                // 左下角 -> 右上。
+                -45.0
+            } else if right && bottom {
+                // 右下角 -> 左上。
+                -135.0
+            } else if left {
+                0.0
+            } else if right {
+                180.0
+            } else if top {
+                90.0
+            } else if bottom {
+                -90.0
+            } else {
+                return None;
+            };
+            Some(target_direction - DEFAULT_CURSOR_DIRECTION_DEG)
         }
     }
 
@@ -594,61 +790,6 @@ impl Overlay {
             self.compositor.present(self.hwnd);
             self.frame_ready = true;
         }
-        self.try_bring_above_taskbar_preview(now);
-    }
-
-    fn try_bring_above_taskbar_preview(&mut self, now: f64) {
-        // 节流到 250ms：原版 C# 用 250ms 定时器调用，而这里每帧（8ms）调用时，
-        // 命中缩略图会每帧 SetWindowPos 插入其上方，与 DWM 实时预览互相拉扯，
-        // 造成卡顿且遮挡不稳定。
-        if now - self.last_preview_refresh_s < 0.25 {
-            return;
-        }
-        self.last_preview_refresh_s = now;
-        unsafe {
-            let (cx, cy) = hook::cursor_pos();
-            let preview = WindowFromPoint(windows_sys::Win32::Foundation::POINT { x: cx, y: cy });
-            let root = if preview.is_null() {
-                std::ptr::null_mut()
-            } else {
-                GetAncestor(preview, GA_ROOT)
-            };
-            if is_task_list_thumbnail(root) {
-                SetWindowPos(
-                    self.hwnd,
-                    root,
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                );
-                return;
-            }
-            let name: Vec<u16> = "TaskListThumbnailWnd\0".encode_utf16().collect();
-            let mut found = FindWindowW(name.as_ptr(), std::ptr::null());
-            while !found.is_null() {
-                let mut rect: windows_sys::Win32::Foundation::RECT = std::mem::zeroed();
-                if GetWindowRect(found, &mut rect) != 0
-                    && cx >= rect.left
-                    && cx < rect.right
-                    && cy >= rect.top
-                    && cy < rect.bottom
-                {
-                    SetWindowPos(
-                        self.hwnd,
-                        found,
-                        0,
-                        0,
-                        0,
-                        0,
-                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                    );
-                    return;
-                }
-                found = GetWindow(found, GW_HWNDNEXT);
-            }
-        }
     }
 
     fn toggle_enabled(&mut self, enabled: bool) {
@@ -670,6 +811,9 @@ impl Overlay {
             self.frame_ready = false;
             unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
         } else {
+            self.suspended_for_secure_desktop = false;
+            self.suspended_for_fullscreen = false;
+            self.suspended_for_taskbar_preview = false;
             hook::uninstall();
             self.mouse_hook_active = false;
             system_cursor::restore();
@@ -703,7 +847,7 @@ impl Overlay {
 
     fn handle_tray(&mut self, lparam: u32) {
         if lparam == WM_RBUTTONUP as u32 || lparam == WM_CONTEXTMENU as u32 {
-            crate::tray::show_menu(self.hwnd);
+            crate::tray::show_menu(self.hwnd, self.cursor_enabled);
         } else if lparam == WM_LBUTTONUP as u32 {
             self.open_settings();
         }
@@ -725,12 +869,158 @@ fn rand_f() -> f64 {
     frac.abs()
 }
 
-unsafe fn is_task_list_thumbnail(hwnd: HWND) -> bool {
-    if hwnd.is_null() {
+/// 返回前台窗口是否需要全屏降级。浏览器全屏视频仍由 DWM/浏览器窗口承载，
+/// 因而保留动画覆盖层；其余覆盖显示器的程序（例如游戏）则恢复系统鼠标。
+unsafe fn foreground_window_covers_monitor(
+    fullscreen_exclusions: &str,
+    fullscreen_exclusion_executables: &[String],
+) -> bool {
+    let hwnd = GetForegroundWindow();
+    if hwnd.is_null()
+        || IsWindowVisible(hwnd) == 0
+        || is_desktop_shell_window(hwnd)
+        || is_browser_window(hwnd)
+        || matches_fullscreen_exclusion(
+            hwnd,
+            fullscreen_exclusions,
+            fullscreen_exclusion_executables,
+        )
+    {
         return false;
     }
-    let mut buf = [0u16; 256];
-    let n = GetClassNameW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
-    let name = String::from_utf16_lossy(&buf[..n as usize]);
-    name == "TaskListThumbnailWnd"
+    let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    if monitor.is_null() {
+        return false;
+    }
+
+    let mut monitor_info: MONITORINFO = std::mem::zeroed();
+    monitor_info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+    let mut window_rect: windows_sys::Win32::Foundation::RECT = std::mem::zeroed();
+    if GetMonitorInfoW(monitor, &mut monitor_info) == 0
+        || GetWindowRect(hwnd, &mut window_rect) == 0
+    {
+        return false;
+    }
+
+    const EDGE_TOLERANCE: i32 = 8;
+    let monitor_rect = monitor_info.rcMonitor;
+    window_rect.left <= monitor_rect.left + EDGE_TOLERANCE
+        && window_rect.top <= monitor_rect.top + EDGE_TOLERANCE
+        && window_rect.right >= monitor_rect.right - EDGE_TOLERANCE
+        && window_rect.bottom >= monitor_rect.bottom - EDGE_TOLERANCE
+}
+
+/// 点击桌面后 Explorer 的 Progman / WorkerW 可能成为前台窗口，且其矩形覆盖
+/// 整个显示器。它们不是独占全屏程序，必须在全屏降级检测中排除。
+unsafe fn is_desktop_shell_window(hwnd: HWND) -> bool {
+    matches!(
+        window_class_name(hwnd).as_deref(),
+        Some("Progman") | Some("WorkerW")
+    )
+}
+
+/// Chromium 系浏览器共用 Chrome_WidgetWin_1；Firefox 使用 MozillaWindowClass。
+/// 这些窗口的视频全屏无需禁用 Curosu 动画覆盖层。
+unsafe fn is_browser_window(hwnd: HWND) -> bool {
+    matches!(
+        window_class_name(hwnd).as_deref(),
+        Some("Chrome_WidgetWin_1") | Some("MozillaWindowClass")
+    )
+}
+
+/// 用户可在设置中按程序名、窗口类名或标题关键字排除全屏降级。空行与未知格式
+/// 被忽略，规则比较不区分 ASCII 大小写。
+unsafe fn matches_fullscreen_exclusion(
+    hwnd: HWND,
+    rules: &str,
+    executables: &[String],
+) -> bool {
+    let class_name = window_class_name(hwnd).unwrap_or_default();
+    let title = window_title(hwnd);
+    let executable = window_executable_name(hwnd).unwrap_or_default();
+
+    if executables
+        .iter()
+        .any(|entry| executable.eq_ignore_ascii_case(entry.trim()))
+    {
+        return true;
+    }
+    if rules.trim().is_empty() {
+        return false;
+    }
+
+    rules.lines().map(str::trim).filter(|rule| !rule.is_empty()).any(|rule| {
+        if let Some(value) = rule.strip_prefix("exe:") {
+            executable.eq_ignore_ascii_case(value.trim())
+        } else if let Some(value) = rule.strip_prefix("class:") {
+            class_name.eq_ignore_ascii_case(value.trim())
+        } else if let Some(value) = rule.strip_prefix("title:") {
+            title.to_lowercase().contains(&value.trim().to_lowercase())
+        } else {
+            false
+        }
+    })
+}
+
+unsafe fn window_class_name(hwnd: HWND) -> Option<String> {
+    let mut class_name = [0u16; 64];
+    let len = GetClassNameW(hwnd, class_name.as_mut_ptr(), class_name.len() as i32);
+    if len <= 0 {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&class_name[..len as usize]))
+}
+
+unsafe fn window_title(hwnd: HWND) -> String {
+    let mut title = [0u16; 512];
+    let len = GetWindowTextW(hwnd, title.as_mut_ptr(), title.len() as i32);
+    String::from_utf16_lossy(&title[..len.max(0) as usize])
+}
+
+unsafe fn window_executable_name(hwnd: HWND) -> Option<String> {
+    let mut process_id = 0;
+    GetWindowThreadProcessId(hwnd, &mut process_id);
+    if process_id == 0 {
+        return None;
+    }
+    let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id);
+    if process.is_null() {
+        return None;
+    }
+
+    let mut path = [0u16; 1024];
+    let mut len = path.len() as u32;
+    let queried = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, path.as_mut_ptr(), &mut len);
+    CloseHandle(process);
+    if queried == 0 || len == 0 {
+        return None;
+    }
+    std::path::Path::new(&String::from_utf16_lossy(&path[..len as usize]))
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+}
+
+/// `TaskListThumbnailWnd` 是传统与当前 Shell 都会使用的缩略图宿主类。
+/// 它存在时直接用真实窗口矩形命中，不再依赖猜测的预览高度。
+unsafe fn is_cursor_over_taskbar_preview_window() -> bool {
+    cursor_window_or_root_matches(is_taskbar_preview_window_class)
+}
+
+unsafe fn cursor_window_or_root_matches(matches: fn(&str) -> bool) -> bool {
+    let (cx, cy) = hook::cursor_pos();
+    let window = WindowFromPoint(windows_sys::Win32::Foundation::POINT { x: cx, y: cy });
+    if window.is_null() {
+        return false;
+    }
+    if window_class_name(window).as_deref().is_some_and(matches) {
+        return true;
+    }
+    let root = GetAncestor(window, GA_ROOT);
+    !root.is_null()
+        && root != window
+        && window_class_name(root).as_deref().is_some_and(matches)
+}
+
+fn is_taskbar_preview_window_class(class_name: &str) -> bool {
+    class_name.starts_with("TaskListThumbnail") || class_name.starts_with("TaskListThumb")
 }

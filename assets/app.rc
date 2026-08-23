@@ -3,4 +3,5 @@
 // 否则 manifest 会被存成非标准资源类型，Windows 加载器读不到。
 #define RT_MANIFEST 24
 1 ICON "icon.ico"
+2 CURSOR "uac-cursor.cur"
 1 RT_MANIFEST "app.manifest"

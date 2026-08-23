@@ -7,12 +7,18 @@ use crate::settings::Settings;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM};
+use windows_sys::Win32::System::Threading::{
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, PostMessageW, SetForegroundWindow, ShowWindow, SW_HIDE, SW_SHOW,
+    EnumWindows, FindWindowW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+    PostMessageW, SetForegroundWindow, ShowWindow, SW_HIDE, SW_SHOW,
 };
 
 const APP_ICON_ICO: &[u8] = include_bytes!("../assets/icon.ico");
+const TORUS_REGULAR_OTF: &[u8] = include_bytes!("../assets/Torus-Regular.otf");
 const BACKGROUND: egui::Color32 = egui::Color32::from_rgb(18, 19, 24);
 const PANEL: egui::Color32 = egui::Color32::from_rgb(30, 31, 38);
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(255, 102, 171);
@@ -20,37 +26,73 @@ const TEXT: egui::Color32 = egui::Color32::from_rgb(238, 239, 244);
 const MUTED: egui::Color32 = egui::Color32::from_rgb(158, 160, 172);
 /// 滑条轨道底色（比面板亮一档，保证轨道在面板上可见）。
 const RAIL: egui::Color32 = egui::Color32::from_rgb(100, 103, 113);
+const CONTROL_BG: egui::Color32 = egui::Color32::from_rgb(37, 37, 46);
+const CONTROL_HOVER: egui::Color32 = egui::Color32::from_rgb(48, 44, 55);
+const CONTROL_BORDER: egui::Color32 = egui::Color32::from_rgb(255, 116, 181);
+const SLIDER_TRACK: egui::Color32 = egui::Color32::from_rgb(29, 29, 36);
+const SLIDER_FILL: egui::Color32 = egui::Color32::from_rgb(205, 77, 162);
+const SLIDER_HIGHLIGHT: egui::Color32 = egui::Color32::from_rgb(255, 151, 212);
+/// 下拉列表滚动条的灰紫把手，贴近 osu! 的宽胶囊形滚动条。
+const SCROLL_HANDLE: egui::Color32 = egui::Color32::from_rgb(185, 179, 197);
 
-/// 加载中文字体（Microsoft YaHei）注入 egui。
+/// 使用内嵌 Torus 作为拉丁文字体，并以系统微软雅黑补齐中文字符。
 fn setup_fonts(ctx: &egui::Context) {
-    let candidates = [
+    let yahei_candidates = [
         r"C:\Windows\Fonts\msyh.ttc",
         r"C:\Windows\Fonts\msyh.ttf",
         r"C:\Windows\Fonts\msyhbd.ttc",
     ];
-    for path in candidates.iter() {
+
+    let mut fonts = egui::FontDefinitions::default();
+    let mut has_yahei = false;
+    fonts.font_data.insert(
+        "torus".to_owned(),
+        egui::FontData::from_static(TORUS_REGULAR_OTF),
+    );
+    for path in yahei_candidates {
         if let Ok(bytes) = std::fs::read(path) {
-            let mut fonts = egui::FontDefinitions::default();
             fonts
                 .font_data
                 .insert("msyh".to_owned(), egui::FontData::from_owned(bytes));
-            if let Some(f) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-                f.insert(0, "msyh".to_owned());
-            }
-            if let Some(f) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-                f.push("msyh".to_owned());
-            }
-            ctx.set_fonts(fonts);
-            return;
+            has_yahei = true;
+            break;
         }
     }
-    log("settings_ui: no CJK font found, using default");
+
+    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        if has_yahei {
+            family.insert(0, "msyh".to_owned());
+        }
+        family.insert(0, "torus".to_owned());
+    }
+    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+        if has_yahei {
+            family.insert(0, "msyh".to_owned());
+        }
+        family.insert(0, "torus".to_owned());
+    }
+
+    ctx.set_fonts(fonts);
+    if has_yahei {
+        log("settings_ui: loaded embedded Torus with Microsoft YaHei fallback");
+    } else {
+        log("settings_ui: loaded embedded Torus; Microsoft YaHei fallback unavailable");
+    }
 }
 
 fn setup_style(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
     style.spacing.item_spacing = egui::vec2(10.0, 8.0);
     style.spacing.slider_width = 320.0;
+    // ComboBox 的弹出层由 Context 样式创建，不会继承局部 ui.scope。
+    // 因此把滚动条规格放在全局样式，保证窗口列表也使用 osu! 风格的宽圆角把手。
+    let scroll = &mut style.spacing.scroll;
+    scroll.floating = false;
+    scroll.bar_width = 18.0;
+    scroll.handle_min_length = 44.0;
+    scroll.bar_inner_margin = 4.0;
+    scroll.bar_outer_margin = 2.0;
+    scroll.foreground_color = true;
 
     let mut visuals = egui::Visuals::dark();
     visuals.override_text_color = Some(TEXT);
@@ -66,6 +108,21 @@ fn setup_style(ctx: &egui::Context) {
     visuals.widgets.active.fg_stroke.color = TEXT;
     visuals.selection.bg_fill = ACCENT;
     visuals.selection.stroke.color = TEXT;
+    visuals.extreme_bg_color = CONTROL_BG;
+    visuals.window_fill = CONTROL_BG;
+    visuals.window_stroke = egui::Stroke::new(2.0_f32, CONTROL_BORDER);
+    visuals.window_rounding = egui::Rounding::same(8.0);
+    visuals.menu_rounding = egui::Rounding::same(8.0);
+    // ScrollArea 在 foreground_color 模式下以各状态的 fg_stroke 绘制把手。
+    // 统一为圆角灰紫色，避免默认白色直角块与 osu! 列表风格冲突。
+    for widget in [
+        &mut visuals.widgets.inactive,
+        &mut visuals.widgets.hovered,
+        &mut visuals.widgets.active,
+    ] {
+        widget.fg_stroke.color = SCROLL_HANDLE;
+        widget.rounding = egui::Rounding::same(10.0);
+    }
     // 显示"起点→滑块"的填充段（用 selection.bg_fill=ACCENT 粉色），
     // 对齐原版 WPF 滑条"粉填充 + 灰轨道"外观。
     visuals.slider_trailing_fill = true;
@@ -106,6 +163,9 @@ fn section(ui: &mut egui::Ui, title: &str, contents: impl FnOnce(&mut egui::Ui))
         .rounding(egui::Rounding::same(8.0))
         .inner_margin(egui::Margin::same(14.0))
         .show(ui, |ui| {
+            // Frame 默认按子控件收缩；选择器一行较短时会让整个面板变窄。
+            // 统一最小宽度后所有设置卡片与 osu! 风格的整列面板对齐。
+            ui.set_min_width(ui.available_width());
             ui.label(
                 egui::RichText::new(title)
                     .size(14.0)
@@ -115,18 +175,6 @@ fn section(ui: &mut egui::Ui, title: &str, contents: impl FnOnce(&mut egui::Ui))
             ui.add_space(2.0);
             contents(ui);
         });
-}
-
-fn value_row(ui: &mut egui::Ui, left: &str, right: String) {
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(left).size(13.0).color(MUTED));
-        ui.with_layout(
-            egui::Layout::right_to_left(egui::Align::Center),
-            |ui| {
-                ui.label(egui::RichText::new(right).size(13.0).color(TEXT));
-            },
-        );
-    });
 }
 
 fn draw_switch(ui: &mut egui::Ui, id_source: &str, checked: &mut bool, label: &str) {
@@ -179,12 +227,136 @@ fn draw_switch(ui: &mut egui::Ui, id_source: &str, checked: &mut bool, label: &s
 }
 
 fn draw_slider(ui: &mut egui::Ui, value: &mut f64, range: std::ops::RangeInclusive<f64>) {
-    ui.add(egui::Slider::new(value, range).show_value(false));
+    let min = *range.start();
+    let max = *range.end();
+    let width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(width, 52.0),
+        egui::Sense::click_and_drag(),
+    );
+    let track = rect.shrink2(egui::vec2(0.0, 3.0));
+
+    if let Some(pointer) = response.interact_pointer_pos() {
+        let progress = ((pointer.x - track.left()) / track.width()).clamp(0.0, 1.0) as f64;
+        *value = (min + (max - min) * progress).clamp(min, max);
+    }
+
+    let progress = if max > min {
+        ((*value - min) / (max - min)).clamp(0.0, 1.0) as f32
+    } else {
+        0.0
+    };
+    // 把手宽 18px，中心点必须留出两端各半个把手的空间，否则 0%/100% 时会
+    // 伸出滑轨。输入仍按完整轨道映射，方便点击两端直接设为最小/最大值。
+    let thumb_half_width = 9.0;
+    let thumb_x = egui::lerp(
+        (track.left() + thumb_half_width)..=(track.right() - thumb_half_width),
+        progress,
+    );
+    let fill = egui::Rect::from_min_max(
+        track.left_top(),
+        egui::pos2((thumb_x + 8.0).min(track.right()), track.bottom()),
+    );
+    let thumb = egui::Rect::from_center_size(
+        egui::pos2(thumb_x, rect.center().y),
+        egui::vec2(18.0, 40.0),
+    );
+    let track_stroke = if response.hovered() || response.dragged() {
+        egui::Stroke::new(1.5_f32, CONTROL_BORDER)
+    } else {
+        egui::Stroke::NONE
+    };
+    ui.painter().rect_filled(track, 8.0, SLIDER_TRACK);
+    ui.painter().rect_stroke(track, 8.0, track_stroke);
+    ui.painter().rect_filled(fill, 8.0, SLIDER_FILL);
+    ui.painter().rect_filled(thumb, 7.0, SLIDER_FILL);
+    let highlight = egui::Rect::from_center_size(
+        egui::pos2(thumb.right() - 5.0, thumb.center().y),
+        egui::vec2(4.0, 28.0),
+    );
+    ui.painter().rect_filled(highlight, 2.0, SLIDER_HIGHLIGHT);
+
+    if response.hovered() || response.dragged() {
+        ui.output_mut(|output| output.cursor_icon = egui::CursorIcon::PointingHand);
+    }
 }
 
 fn draw_volume(ui: &mut egui::Ui, label: &str, value: &mut f64) {
-    value_row(ui, label, format!("{}%", (*value * 100.0).round() as i32));
-    draw_slider(ui, value, 0.0..=1.0);
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.label(egui::RichText::new(label).size(13.0).color(MUTED));
+            ui.label(
+                egui::RichText::new(format!("{}%", (*value * 100.0).round() as i32))
+                    .size(18.0)
+                    .color(TEXT),
+            );
+        });
+        ui.add_space(14.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), 52.0),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| draw_slider(ui, value, 0.0..=1.0),
+        );
+    });
+}
+
+fn accent_button(ui: &mut egui::Ui, label: &str, size: egui::Vec2) -> egui::Response {
+    ui.add_sized(
+        size,
+        egui::Button::new(egui::RichText::new(label).color(TEXT))
+            .fill(ACCENT)
+            .stroke(egui::Stroke::NONE),
+    )
+}
+
+fn reset_icon_button(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(36.0, 52.0), egui::Sense::click());
+    if response.hovered() {
+        ui.painter().rect_filled(rect, 6.0, CONTROL_HOVER);
+        ui.output_mut(|output| output.cursor_icon = egui::CursorIcon::PointingHand);
+    }
+
+    // 不依赖字体的回转箭头，避免 Microsoft YaHei 缺少 ↶ 字形而显示方块。
+    // 两段贝塞尔曲线保持圆弧平滑，避免折线在小尺寸下看起来像损坏的图标。
+    let center = rect.center();
+    let stroke = egui::Stroke::new(2.2_f32, ACCENT);
+    ui.painter().add(egui::Shape::CubicBezier(
+        egui::epaint::CubicBezierShape::from_points_stroke(
+            [
+                egui::pos2(center.x + 8.0, center.y + 3.0),
+                egui::pos2(center.x + 8.0, center.y + 8.0),
+                egui::pos2(center.x - 8.0, center.y + 9.0),
+                egui::pos2(center.x - 8.0, center.y),
+            ],
+            false,
+            egui::Color32::TRANSPARENT,
+            stroke,
+        ),
+    ));
+    ui.painter().add(egui::Shape::CubicBezier(
+        egui::epaint::CubicBezierShape::from_points_stroke(
+            [
+                egui::pos2(center.x - 8.0, center.y),
+                egui::pos2(center.x - 8.0, center.y - 8.0),
+                egui::pos2(center.x + 1.0, center.y - 10.0),
+                egui::pos2(center.x + 6.0, center.y - 6.0),
+            ],
+            false,
+            egui::Color32::TRANSPARENT,
+            stroke,
+        ),
+    ));
+    // 实心、加大的箭头让 36px 按钮内的图标一眼能辨认为“恢复默认”。
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(center.x + 9.5, center.y - 7.0),
+            egui::pos2(center.x + 2.0, center.y - 11.0),
+            egui::pos2(center.x + 2.0, center.y - 3.0),
+        ],
+        ACCENT,
+        egui::Stroke::NONE,
+    ));
+    response.on_hover_text("恢复默认")
 }
 
 /// 设置线程的控制命令。
@@ -205,9 +377,30 @@ struct SettingsApp {
     hwnd: HWND,
     rx: Receiver<UiCmd>,
     settings_hwnd_found: bool,
+    selectable_windows: Vec<WindowChoice>,
+    selected_window_executable: Option<String>,
+}
+
+#[derive(Clone)]
+struct WindowChoice {
+    executable: String,
+    label: String,
 }
 
 impl SettingsApp {
+    fn refresh_selectable_windows(&mut self) {
+        self.selectable_windows = enumerate_visible_windows();
+        if let Some(selected) = &self.selected_window_executable {
+            if !self
+                .selectable_windows
+                .iter()
+                .any(|window| &window.executable == selected)
+            {
+                self.selected_window_executable = None;
+            }
+        }
+    }
+
     /// 记录设置窗口自己的 HWND，供 overlay 原生显示/隐藏。
     fn find_own_hwnd(&mut self) {
         if self.settings_hwnd_found {
@@ -266,6 +459,9 @@ impl SettingsApp {
 impl eframe::App for SettingsApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_commands(ctx);
+        if self.selectable_windows.is_empty() {
+            self.refresh_selectable_windows();
+        }
 
         let mut s = {
             let g = self.settings.lock().unwrap_or_else(|e| e.into_inner());
@@ -288,19 +484,35 @@ impl eframe::App for SettingsApp {
                 );
                 ui.add_space(18.0);
 
+                // 例外列表会随着用户添加持续增长；主体必须在固定大小的设置窗口内
+                // 滚动，而不是让底部内容被裁掉。
+                egui::ScrollArea::vertical()
+                    .id_source("settings_content_scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
                 section(ui, "光标", |ui| {
-                    value_row(ui, "16 - 64", format!("{:.0} px", s.cursor_width));
-                    draw_slider(ui, &mut s.cursor_width, 16.0..=64.0);
-
-                    let reset = ui.add_sized(
-                        egui::vec2(96.0, 30.0),
-                        egui::Button::new(egui::RichText::new("恢复默认").color(TEXT))
-                            .fill(ACCENT)
-                            .stroke(egui::Stroke::NONE),
-                    );
-                    if reset.clicked() {
-                        s.cursor_width = 30.0;
-                    }
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new("光标大小").size(13.0).color(MUTED));
+                            ui.label(
+                                egui::RichText::new(format!("{:.0} px", s.cursor_width))
+                                    .size(18.0)
+                                    .color(TEXT),
+                            );
+                        });
+                        ui.add_space(14.0);
+                        let slider_width = (ui.available_width() - 42.0).max(48.0);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(slider_width, 52.0),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| draw_slider(ui, &mut s.cursor_width, 16.0..=64.0),
+                        );
+                        ui.add_space(6.0);
+                        if reset_icon_button(ui).clicked() {
+                            s.cursor_width = 30.0;
+                        }
+                    });
                 });
                 ui.add_space(12.0);
 
@@ -331,6 +543,142 @@ impl eframe::App for SettingsApp {
                 section(ui, "系统", |ui| {
                     draw_switch(ui, "auto_start", &mut s.auto_start, "开机自启");
                 });
+                ui.add_space(12.0);
+
+                section(ui, "全屏例外", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("选择后添加：该程序全屏时仍显示动画光标")
+                                .size(12.0)
+                                .color(MUTED),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if accent_button(ui, "刷新窗口列表", egui::vec2(96.0, 28.0)).clicked() {
+                                self.refresh_selectable_windows();
+                            }
+                        });
+                    });
+                    ui.add_space(4.0);
+
+                    ui.horizontal(|ui| {
+
+                        let selected_label = self
+                            .selected_window_executable
+                            .as_ref()
+                            .and_then(|selected| {
+                                self.selectable_windows
+                                    .iter()
+                                    .find(|window| &window.executable == selected)
+                            })
+                            .map(|window| window.label.as_str())
+                            .unwrap_or("选择窗口…");
+                        // ComboBox::width 是最小宽度而不是最大宽度。把它放进固定宽度
+                        // 的子 UI 并启用截断，长窗口标题不会再挤掉“添加”按钮。
+                        let selector_width =
+                            (ui.available_width() - 58.0 - ui.spacing().item_spacing.x).max(80.0);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(selector_width, 52.0),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| ui.scope(|ui| {
+                            ui.style_mut().spacing.interact_size.y = 52.0;
+                            ui.style_mut().spacing.button_padding = egui::vec2(10.0, 8.0);
+                            let visuals = &mut ui.style_mut().visuals;
+                            visuals.extreme_bg_color = CONTROL_BG;
+                            visuals.window_fill = CONTROL_BG;
+                            visuals.window_stroke = egui::Stroke::new(2.0_f32, CONTROL_BORDER);
+                            visuals.window_rounding = egui::Rounding::same(8.0);
+                            visuals.menu_rounding = egui::Rounding::same(8.0);
+                            for widget in [
+                                &mut visuals.widgets.inactive,
+                                &mut visuals.widgets.hovered,
+                                &mut visuals.widgets.active,
+                                &mut visuals.widgets.open,
+                            ] {
+                                widget.bg_fill = CONTROL_BG;
+                                widget.weak_bg_fill = CONTROL_BG;
+                                widget.bg_stroke = egui::Stroke::new(1.5_f32, CONTROL_BORDER);
+                                widget.rounding = egui::Rounding::same(6.0);
+                                widget.fg_stroke.color = TEXT;
+                            }
+                            visuals.widgets.hovered.bg_fill = CONTROL_HOVER;
+                            visuals.widgets.active.bg_fill = CONTROL_HOVER;
+                            visuals.widgets.open.bg_fill = CONTROL_HOVER;
+                            // ScrollArea 在 foreground_color 模式下使用 fg_stroke 作把手。
+                            // 保持下拉本身的深色背景，同时获得参考图那种浅紫宽把手。
+                            visuals.widgets.inactive.fg_stroke.color = SCROLL_HANDLE;
+                            visuals.widgets.hovered.fg_stroke.color = SCROLL_HANDLE;
+                            visuals.widgets.active.fg_stroke.color = SCROLL_HANDLE;
+                            visuals.selection.bg_fill = SLIDER_FILL;
+                            visuals.selection.stroke = egui::Stroke::NONE;
+
+                            egui::ComboBox::from_id_source("fullscreen_exception_window")
+                                .selected_text(egui::RichText::new(selected_label).color(TEXT))
+                                .width(selector_width)
+                                .height(260.0)
+                                .truncate()
+                                .icon(|ui, rect, _visuals, is_open, _| {
+                                    let center = rect.center();
+                                    let direction = if is_open { -1.0 } else { 1.0 };
+                                    let left = egui::pos2(center.x - 5.0, center.y - 2.5 * direction);
+                                    let middle = egui::pos2(center.x, center.y + 2.5 * direction);
+                                    let right = egui::pos2(center.x + 5.0, center.y - 2.5 * direction);
+                                    let stroke = egui::Stroke::new(2.0_f32, TEXT);
+                                    ui.painter().line_segment([left, middle], stroke);
+                                    ui.painter().line_segment([middle, right], stroke);
+                                })
+                                .show_ui(ui, |ui| {
+                                    for window in &self.selectable_windows {
+                                        ui.selectable_value(
+                                            &mut self.selected_window_executable,
+                                            Some(window.executable.clone()),
+                                            &window.label,
+                                        );
+                                    }
+                                });
+                            }),
+                        );
+
+                        let can_add = self.selected_window_executable.is_some();
+                        if ui
+                            .add_enabled_ui(can_add, |ui| {
+                                accent_button(ui, "添加", egui::vec2(58.0, 52.0))
+                            })
+                            .inner
+                            .clicked()
+                        {
+                            let executable = self
+                                .selected_window_executable
+                                .as_ref()
+                                .expect("button is enabled only with a selection");
+                            if !s
+                                .fullscreen_overlay_exclusion_executables
+                                .iter()
+                                .any(|item| item.eq_ignore_ascii_case(executable))
+                            {
+                                s.fullscreen_overlay_exclusion_executables
+                                    .push(executable.clone());
+                            }
+                        }
+                    });
+
+                    let mut remove_index = None;
+                    for (index, executable) in s
+                        .fullscreen_overlay_exclusion_executables
+                        .iter()
+                        .enumerate()
+                    {
+                        ui.horizontal(|ui| {
+                            ui.label(executable);
+                            if ui.small_button("移除").clicked() {
+                                remove_index = Some(index);
+                            }
+                        });
+                    }
+                    if let Some(index) = remove_index {
+                        s.fullscreen_overlay_exclusion_executables.remove(index);
+                    }
+                });
+                    });
             });
 
         if s != before {
@@ -344,6 +692,77 @@ impl eframe::App for SettingsApp {
             }
         }
     }
+}
+
+fn enumerate_visible_windows() -> Vec<WindowChoice> {
+    let mut windows: Vec<WindowChoice> = Vec::new();
+    unsafe {
+        EnumWindows(
+            Some(collect_visible_window),
+            &mut windows as *mut Vec<WindowChoice> as LPARAM,
+        );
+    }
+    windows.sort_by(|left, right| left.label.cmp(&right.label));
+    windows
+}
+
+unsafe extern "system" fn collect_visible_window(hwnd: HWND, lparam: LPARAM) -> i32 {
+    if IsWindowVisible(hwnd) == 0 {
+        return 1;
+    }
+    let mut title = [0u16; 256];
+    let title_len = GetWindowTextW(hwnd, title.as_mut_ptr(), title.len() as i32);
+    if title_len <= 0 {
+        return 1;
+    }
+    let Some(executable) = window_executable_name(hwnd) else {
+        return 1;
+    };
+    if executable.eq_ignore_ascii_case("curosu.exe") {
+        return 1;
+    }
+
+    let windows = &mut *(lparam as *mut Vec<WindowChoice>);
+    if windows
+        .iter()
+        .any(|window| window.executable.eq_ignore_ascii_case(&executable))
+    {
+        return 1;
+    }
+    let title = String::from_utf16_lossy(&title[..title_len as usize]);
+    windows.push(WindowChoice {
+        label: format!("{executable} — {title}"),
+        executable,
+    });
+    1
+}
+
+unsafe fn window_executable_name(hwnd: HWND) -> Option<String> {
+    let mut process_id = 0;
+    GetWindowThreadProcessId(hwnd, &mut process_id);
+    if process_id == 0 {
+        return None;
+    }
+    let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id);
+    if process.is_null() {
+        return None;
+    }
+
+    let mut path = [0u16; 1024];
+    let mut path_len = path.len() as u32;
+    let queried = QueryFullProcessImageNameW(
+        process,
+        PROCESS_NAME_WIN32,
+        path.as_mut_ptr(),
+        &mut path_len,
+    );
+    CloseHandle(process);
+    if queried == 0 || path_len == 0 {
+        return None;
+    }
+    std::path::Path::new(&String::from_utf16_lossy(&path[..path_len as usize]))
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
 }
 
 /// 常驻设置线程的命令发送端与启动标记。
@@ -393,7 +812,7 @@ fn settings_thread(rx: Receiver<UiCmd>, settings: Arc<Mutex<Settings>>, hwnd_usi
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         let native_options = eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
-                .with_inner_size([420.0, 650.0])
+                .with_inner_size([460.0, 780.0])
                 .with_title("Curosu 设置")
                 .with_resizable(false)
                 .with_minimize_button(true)
@@ -424,6 +843,8 @@ fn settings_thread(rx: Receiver<UiCmd>, settings: Arc<Mutex<Settings>>, hwnd_usi
                 hwnd: hwnd_usize as HWND,
                 rx,
                 settings_hwnd_found: false,
+                selectable_windows: enumerate_visible_windows(),
+                selected_window_executable: None,
             }) as Box<dyn eframe::App>)
         };
         match eframe::run_native("Curosu", native_options, Box::new(app_creator)) {

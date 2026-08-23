@@ -77,6 +77,9 @@ pub struct CursorAnim {
     pub mouse_down: bool,
     pub drag_active: bool,
     pub pointer_hover: bool,
+    /// 鼠标停在可调整大小的窗口边框时的静止朝向；按下后立即清空，
+    /// 让现有拖动/回弹旋转逻辑接管。
+    pub resize_angle: Option<f64>,
     pub spin_returning: bool,
     pub elastic_returning: bool,
     spin_elapsed: f64,
@@ -105,6 +108,7 @@ impl Default for CursorAnim {
             mouse_down: false,
             drag_active: false,
             pointer_hover: false,
+            resize_angle: None,
             spin_returning: false,
             elastic_returning: false,
             spin_elapsed: 0.0,
@@ -134,6 +138,7 @@ impl CursorAnim {
     pub fn begin_press(&mut self) {
         self.spin_returning = false;
         self.elastic_returning = false;
+        self.resize_angle = None;
         self.mouse_down = true;
         self.drag_active = false;
         self.drag_target_angle = self.angle;
@@ -266,12 +271,14 @@ impl CursorAnim {
             self.update_elastic_return(dt);
             (1.0, 0.0, self.angle)
         } else {
-            // 原版只把 OCR_HAND（pointer_hover）作为悬停视觉状态。
-            let target_angle = if self.pointer_hover {
-                POINTER_ANGLE
-            } else {
-                0.0
-            };
+            // 边框方向优先于普通链接悬停；没有边框方向时保留原版手型角度。
+            let target_angle = self.resize_angle.unwrap_or_else(|| {
+                if self.pointer_hover {
+                    POINTER_ANGLE
+                } else {
+                    0.0
+                }
+            });
             let delta = normalize_angle(target_angle - self.angle);
             self.angle_velocity += (240.0 * delta - 20.0 * self.angle_velocity) * dt;
             let a = self.angle + self.angle_velocity * dt;
@@ -295,10 +302,14 @@ impl CursorAnim {
             } else {
                 0.0
             }
-        } else if self.pointer_hover && !self.elastic_returning && !self.spin_returning {
-            POINTER_ANGLE
         } else if !self.elastic_returning && !self.spin_returning {
-            0.0
+            self.resize_angle.unwrap_or_else(|| {
+                if self.pointer_hover {
+                    POINTER_ANGLE
+                } else {
+                    0.0
+                }
+            })
         } else {
             self.angle
         };
@@ -349,6 +360,22 @@ mod tests {
         let settled = anim;
         anim.update(1.0 / 60.0, 0.0, 0.0);
         assert!(!anim.visual_changed_from(&settled));
+    }
+
+    #[test]
+    fn resize_angle_overrides_hover_and_clears_on_press() {
+        let mut anim = CursorAnim::default();
+        anim.pointer_hover = true;
+        anim.resize_angle = Some(180.0);
+        for _ in 0..120 {
+            anim.update(1.0 / 60.0, 0.0, 0.0);
+        }
+        assert!((anim.angle - 180.0).abs() < 0.1, "边框角度未收敛: {}", anim.angle);
+
+        anim.begin_press();
+        assert_eq!(anim.resize_angle, None);
+        anim.update(1.0 / 60.0, 0.0, 0.0);
+        assert!(anim.angle < 180.0, "按下后未回到默认旋转路径");
     }
 
     #[test]
