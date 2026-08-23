@@ -353,13 +353,18 @@ impl Overlay {
         };
 
         if !input_desktop_available && !self.suspended_for_secure_desktop {
-            log("secure desktop entered; restoring system cursors");
+            log("secure desktop entered; switching to static fallback cursor");
             self.suspended_for_secure_desktop = true;
             system_cursor::restore();
+            if !system_cursor::install_uac_fallback() {
+                log("UAC fallback cursor installation failed; using the user's cursor scheme");
+            }
             unsafe { ShowWindow(self.hwnd, SW_HIDE) };
         } else if input_desktop_available && self.suspended_for_secure_desktop {
             log("secure desktop left; restoring cursor overlay");
             self.suspended_for_secure_desktop = false;
+            // 移除仅在 UAC 期间使用的静态 .cur，再恢复原有动画覆盖层。
+            system_cursor::restore();
             if system_cursor::install() {
                 hook::init_position();
                 self.force_topmost = true;
