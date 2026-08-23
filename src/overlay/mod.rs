@@ -13,7 +13,10 @@ use anim::{CursorAnim, CursorGeometry};
 use render::{decode_png, Compositor, CursorTextures};
 use std::sync::{Arc, Mutex};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows_sys::Win32::Graphics::Gdi::{MonitorFromPoint, HMONITOR, MONITOR_DEFAULTTONEAREST};
+use windows_sys::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, HMONITOR, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST,
+};
 use windows_sys::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows_sys::Win32::System::StationsAndDesktops::{
     CloseDesktop, OpenInputDesktop, DESKTOP_READOBJECTS,
@@ -45,6 +48,7 @@ pub const MSG_SETTINGS_CHANGED: u32 = WM_APP + 4;
 
 const FRAME_MS: u32 = 8;
 const INPUT_DESKTOP_CHECK_INTERVAL_S: f64 = 0.25;
+const FULLSCREEN_CHECK_INTERVAL_S: f64 = 0.25;
 
 struct Overlay {
     hwnd: HWND,
@@ -58,8 +62,10 @@ struct Overlay {
 
     cursor_enabled: bool,
     suspended_for_secure_desktop: bool,
+    suspended_for_fullscreen: bool,
     suspended_for_taskbar_preview: bool,
     last_input_desktop_check_s: f64,
+    last_fullscreen_check_s: f64,
     force_topmost: bool,
     dpi_scale: f64,
     dpi_monitor: HMONITOR,
@@ -228,8 +234,10 @@ pub fn run(settings: Arc<Mutex<Settings>>, tap: TapPlayer, hover: TapPlayer) {
             hover,
             cursor_enabled: true,
             suspended_for_secure_desktop: false,
+            suspended_for_fullscreen: false,
             suspended_for_taskbar_preview: false,
             last_input_desktop_check_s: f64::NEG_INFINITY,
+            last_fullscreen_check_s: f64::NEG_INFINITY,
             force_topmost: true,
             dpi_scale: 1.0,
             dpi_monitor: std::ptr::null_mut(),
@@ -302,6 +310,10 @@ impl Overlay {
         if self.suspended_for_secure_desktop {
             return;
         }
+        self.update_fullscreen_state(now);
+        if self.suspended_for_fullscreen {
+            return;
+        }
         self.update_taskbar_preview_state();
         if self.suspended_for_taskbar_preview {
             return;
@@ -358,6 +370,7 @@ impl Overlay {
         if !input_desktop_available && !self.suspended_for_secure_desktop {
             log("secure desktop entered; switching to static fallback cursor");
             self.suspended_for_secure_desktop = true;
+            self.suspended_for_fullscreen = false;
             self.suspended_for_taskbar_preview = false;
             system_cursor::restore();
             if !system_cursor::install_static_fallback() {
@@ -376,6 +389,35 @@ impl Overlay {
                 unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
             } else {
                 // 如果恢复失败，保持普通系统光标，避免再次出现无鼠标的状态。
+                self.cursor_enabled = false;
+            }
+        }
+    }
+
+    /// 真正独占全屏可绕过 DWM 合成，桌面覆盖层不保证能显示。检测到前台窗口覆盖
+    /// 整个显示器时，停止覆盖层并还原用户原来的鼠标方案；退出全屏后恢复动画。
+    fn update_fullscreen_state(&mut self, now: f64) {
+        if now - self.last_fullscreen_check_s < FULLSCREEN_CHECK_INTERVAL_S {
+            return;
+        }
+        self.last_fullscreen_check_s = now;
+
+        let fullscreen = unsafe { foreground_window_covers_monitor() };
+        if fullscreen && !self.suspended_for_fullscreen {
+            log("fullscreen foreground entered; restoring user's system cursor");
+            self.suspended_for_fullscreen = true;
+            self.suspended_for_taskbar_preview = false;
+            system_cursor::restore();
+            unsafe { ShowWindow(self.hwnd, SW_HIDE) };
+        } else if !fullscreen && self.suspended_for_fullscreen {
+            log("fullscreen foreground left; restoring cursor overlay");
+            self.suspended_for_fullscreen = false;
+            if system_cursor::install() {
+                hook::init_position();
+                self.force_topmost = true;
+                self.frame_ready = false;
+                unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
+            } else {
                 self.cursor_enabled = false;
             }
         }
@@ -702,6 +744,7 @@ impl Overlay {
             unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
         } else {
             self.suspended_for_secure_desktop = false;
+            self.suspended_for_fullscreen = false;
             self.suspended_for_taskbar_preview = false;
             hook::uninstall();
             self.mouse_hook_active = false;
@@ -756,6 +799,35 @@ fn rand_f() -> f64 {
     let t = now_seconds() * 1_000_000_000.0;
     let frac = (t * 2654435761.0).fract();
     frac.abs()
+}
+
+/// 返回前台窗口是否几乎完全覆盖其所在显示器。允许窗口阴影/不可见边框带来的
+/// 8px 误差，避免将普通最大化窗口（仅覆盖工作区）误判为全屏。
+unsafe fn foreground_window_covers_monitor() -> bool {
+    let hwnd = GetForegroundWindow();
+    if hwnd.is_null() || IsWindowVisible(hwnd) == 0 {
+        return false;
+    }
+    let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    if monitor.is_null() {
+        return false;
+    }
+
+    let mut monitor_info: MONITORINFO = std::mem::zeroed();
+    monitor_info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+    let mut window_rect: windows_sys::Win32::Foundation::RECT = std::mem::zeroed();
+    if GetMonitorInfoW(monitor, &mut monitor_info) == 0
+        || GetWindowRect(hwnd, &mut window_rect) == 0
+    {
+        return false;
+    }
+
+    const EDGE_TOLERANCE: i32 = 8;
+    let monitor_rect = monitor_info.rcMonitor;
+    window_rect.left <= monitor_rect.left + EDGE_TOLERANCE
+        && window_rect.top <= monitor_rect.top + EDGE_TOLERANCE
+        && window_rect.right >= monitor_rect.right - EDGE_TOLERANCE
+        && window_rect.bottom >= monitor_rect.bottom - EDGE_TOLERANCE
 }
 
 /// DWM 缩略图窗口不是稳定的可枚举 Win32 窗口。基于稳定的 Shell 任务栏矩形，
