@@ -878,6 +878,7 @@ unsafe fn foreground_window_covers_monitor(
     let hwnd = GetForegroundWindow();
     if hwnd.is_null()
         || IsWindowVisible(hwnd) == 0
+        || is_desktop_shell_window(hwnd)
         || is_browser_window(hwnd)
         || matches_fullscreen_exclusion(
             hwnd,
@@ -907,6 +908,15 @@ unsafe fn foreground_window_covers_monitor(
         && window_rect.top <= monitor_rect.top + EDGE_TOLERANCE
         && window_rect.right >= monitor_rect.right - EDGE_TOLERANCE
         && window_rect.bottom >= monitor_rect.bottom - EDGE_TOLERANCE
+}
+
+/// 点击桌面后 Explorer 的 Progman / WorkerW 可能成为前台窗口，且其矩形覆盖
+/// 整个显示器。它们不是独占全屏程序，必须在全屏降级检测中排除。
+unsafe fn is_desktop_shell_window(hwnd: HWND) -> bool {
+    matches!(
+        window_class_name(hwnd).as_deref(),
+        Some("Progman") | Some("WorkerW")
+    )
 }
 
 /// Chromium 系浏览器共用 Chrome_WidgetWin_1；Firefox 使用 MozillaWindowClass。
