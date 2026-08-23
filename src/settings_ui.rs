@@ -25,6 +25,10 @@ const TEXT: egui::Color32 = egui::Color32::from_rgb(238, 239, 244);
 const MUTED: egui::Color32 = egui::Color32::from_rgb(158, 160, 172);
 /// 滑条轨道底色（比面板亮一档，保证轨道在面板上可见）。
 const RAIL: egui::Color32 = egui::Color32::from_rgb(100, 103, 113);
+const CONTROL_BG: egui::Color32 = egui::Color32::from_rgb(37, 37, 46);
+const CONTROL_HOVER: egui::Color32 = egui::Color32::from_rgb(48, 44, 55);
+const CONTROL_BORDER: egui::Color32 = egui::Color32::from_rgb(255, 116, 181);
+const SLIDER_TRACK: egui::Color32 = egui::Color32::from_rgb(29, 29, 36);
 
 /// 加载中文字体（Microsoft YaHei）注入 egui。
 fn setup_fonts(ctx: &egui::Context) {
@@ -184,7 +188,47 @@ fn draw_switch(ui: &mut egui::Ui, id_source: &str, checked: &mut bool, label: &s
 }
 
 fn draw_slider(ui: &mut egui::Ui, value: &mut f64, range: std::ops::RangeInclusive<f64>) {
-    ui.add(egui::Slider::new(value, range).show_value(false));
+    let min = *range.start();
+    let max = *range.end();
+    let width = ui.available_width().min(320.0);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 30.0), egui::Sense::click_and_drag());
+    let track = egui::Rect::from_center_size(rect.center(), egui::vec2(rect.width(), 10.0));
+
+    if let Some(pointer) = response.interact_pointer_pos() {
+        let progress = ((pointer.x - track.left()) / track.width()).clamp(0.0, 1.0) as f64;
+        *value = (min + (max - min) * progress).clamp(min, max);
+    }
+
+    let progress = if max > min {
+        ((*value - min) / (max - min)).clamp(0.0, 1.0) as f32
+    } else {
+        0.0
+    };
+    let thumb_x = egui::lerp(track.left()..=track.right(), progress);
+    let fill = egui::Rect::from_min_max(track.left_top(), egui::pos2(thumb_x, track.bottom()));
+    let thumb = egui::Rect::from_center_size(
+        egui::pos2(thumb_x, rect.center().y),
+        egui::vec2(16.0, 26.0),
+    );
+    let track_stroke = if response.hovered() || response.dragged() {
+        egui::Stroke::new(1.0_f32, CONTROL_BORDER)
+    } else {
+        egui::Stroke::new(1.0_f32, RAIL)
+    };
+    ui.painter().rect_filled(track, 5.0, SLIDER_TRACK);
+    ui.painter().rect_stroke(track, 5.0, track_stroke);
+    ui.painter().rect_filled(fill, 5.0, ACCENT);
+    ui.painter().rect_filled(thumb, 5.0, ACCENT);
+    ui.painter()
+        .rect_stroke(
+            thumb,
+            5.0,
+            egui::Stroke::new(1.0_f32, egui::Color32::WHITE),
+        );
+
+    if response.hovered() || response.dragged() {
+        ui.output_mut(|output| output.cursor_icon = egui::CursorIcon::PointingHand);
+    }
 }
 
 fn draw_volume(ui: &mut egui::Ui, label: &str, value: &mut f64) {
@@ -383,18 +427,48 @@ impl eframe::App for SettingsApp {
                             })
                             .map(|window| window.label.as_str())
                             .unwrap_or("选择窗口…");
-                        egui::ComboBox::from_id_source("fullscreen_exception_window")
-                            .selected_text(selected_label)
-                            .width(210.0)
-                            .show_ui(ui, |ui| {
-                                for window in &self.selectable_windows {
-                                    ui.selectable_value(
-                                        &mut self.selected_window_executable,
-                                        Some(window.executable.clone()),
-                                        &window.label,
-                                    );
-                                }
-                            });
+                        ui.scope(|ui| {
+                            let visuals = &mut ui.style_mut().visuals;
+                            visuals.extreme_bg_color = CONTROL_BG;
+                            for widget in [
+                                &mut visuals.widgets.inactive,
+                                &mut visuals.widgets.hovered,
+                                &mut visuals.widgets.active,
+                                &mut visuals.widgets.open,
+                            ] {
+                                widget.bg_fill = CONTROL_BG;
+                                widget.weak_bg_fill = CONTROL_BG;
+                                widget.bg_stroke = egui::Stroke::new(1.5_f32, CONTROL_BORDER);
+                                widget.rounding = egui::Rounding::same(6.0);
+                                widget.fg_stroke.color = TEXT;
+                            }
+                            visuals.widgets.hovered.bg_fill = CONTROL_HOVER;
+                            visuals.widgets.active.bg_fill = CONTROL_HOVER;
+                            visuals.widgets.open.bg_fill = CONTROL_HOVER;
+                            visuals.selection.bg_fill = ACCENT;
+
+                            egui::ComboBox::from_id_source("fullscreen_exception_window")
+                                .selected_text(selected_label)
+                                .width(210.0)
+                                .icon(|ui, rect, visuals, is_open, _| {
+                                    let center = rect.center();
+                                    let direction = if is_open { -1.0 } else { 1.0 };
+                                    let left = egui::pos2(center.x - 5.0, center.y - 2.5 * direction);
+                                    let middle = egui::pos2(center.x, center.y + 2.5 * direction);
+                                    let right = egui::pos2(center.x + 5.0, center.y - 2.5 * direction);
+                                    ui.painter().line_segment([left, middle], visuals.fg_stroke);
+                                    ui.painter().line_segment([middle, right], visuals.fg_stroke);
+                                })
+                                .show_ui(ui, |ui| {
+                                    for window in &self.selectable_windows {
+                                        ui.selectable_value(
+                                            &mut self.selected_window_executable,
+                                            Some(window.executable.clone()),
+                                            &window.label,
+                                        );
+                                    }
+                                });
+                        });
 
                         let can_add = self.selected_window_executable.is_some();
                         if ui
