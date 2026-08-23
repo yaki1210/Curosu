@@ -70,6 +70,49 @@ GitHub Actions 会在推送到 `main` 时构建 artifact，并在推送 `v*` tag
 
 在“全屏例外”中刷新当前窗口列表，选择程序后点击“添加”。该程序全屏时会继续显示动画光标。
 
+> ### UAC 提示与光标显示
+>
+> 当 Curosu 启动等操作触发 UAC 提示时，Windows 默认会将 UAC 界面切换到 **Secure Desktop（安全桌面）**。由于光标覆盖层运行在普通用户桌面上，切换到 Secure Desktop 后，普通桌面上的光标将不可见。
+>
+> 如果需要在 UAC 提示显示期间仍保持光标可见，可以关闭 Secure Desktop。关闭后，UAC 提示会直接显示在当前用户的普通桌面上，与 Curosu 的覆盖层处于同一个 Desktop，因此不会因切换到 Secure Desktop 而使光标消失。
+>
+> **注意**：关闭 Secure Desktop 会降低 UAC 对桌面隔离和 UI 欺骗攻击的防护能力。建议仅在确有需要时启用。
+>
+> #### 方法一：管理员 CMD
+>
+> 关闭 Secure Desktop：
+>
+> ```bat
+> reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v PromptOnSecureDesktop /t REG_DWORD /d 0 /f
+> ```
+>
+> 恢复 Windows 默认设置：
+>
+> ```bat
+> reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v PromptOnSecureDesktop /t REG_DWORD /d 1 /f
+> ```
+>
+> #### 方法二：注册表编辑器
+>
+> 按 `Win + R`，输入 `regedit`，打开注册表编辑器。
+>
+> 定位到：
+>
+> ```text
+> HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System
+> ```
+>
+> 找到 `PromptOnSecureDesktop`：
+>
+> ```text
+> 0  → 关闭 Secure Desktop，UAC 显示在普通用户桌面上
+> 1  → 启用 Secure Desktop，恢复 Windows 默认行为
+> ```
+>
+> 如果不存在 `PromptOnSecureDesktop`，在 `System` 下新建 `DWORD (32-bit) Value`，名称设置为 `PromptOnSecureDesktop`，然后将值设置为 `0`。
+>
+> 修改完成后，必要时重新登录 Windows 使设置生效。
+
 ## 技术实现
 
 - Rust + Win32 API 实现透明分层窗口与全局光标覆盖

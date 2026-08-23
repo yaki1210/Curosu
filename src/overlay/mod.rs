@@ -674,8 +674,11 @@ impl Overlay {
             if GetWindowRect(root, &mut rect) == 0 {
                 return None;
             }
-            let border_x = GetSystemMetrics(32).max(1);
-            let border_y = GetSystemMetrics(33).max(1);
+            // 实际非客户区命中带 = SM_CXSIZEFRAME/SM_CYSIZEFRAME + SM_CXPADDEDBORDER(92)。
+            // 只用 32/33 会比系统真实 resize 光标区（WM_NCHITTEST）窄几像素，
+            // 导致光标已变形但边缘动画未触发。
+            let border_x = (GetSystemMetrics(32) + GetSystemMetrics(92)).max(1);
+            let border_y = (GetSystemMetrics(33) + GetSystemMetrics(92)).max(1);
             let left = px <= rect.left + border_x;
             let right = px >= rect.right - border_x;
             let top = py <= rect.top + border_y;
