@@ -29,6 +29,8 @@ const CONTROL_BG: egui::Color32 = egui::Color32::from_rgb(37, 37, 46);
 const CONTROL_HOVER: egui::Color32 = egui::Color32::from_rgb(48, 44, 55);
 const CONTROL_BORDER: egui::Color32 = egui::Color32::from_rgb(255, 116, 181);
 const SLIDER_TRACK: egui::Color32 = egui::Color32::from_rgb(29, 29, 36);
+const SLIDER_FILL: egui::Color32 = egui::Color32::from_rgb(205, 77, 162);
+const SLIDER_HIGHLIGHT: egui::Color32 = egui::Color32::from_rgb(255, 151, 212);
 
 /// 加载中文字体（Microsoft YaHei）注入 egui。
 fn setup_fonts(ctx: &egui::Context) {
@@ -115,6 +117,9 @@ fn section(ui: &mut egui::Ui, title: &str, contents: impl FnOnce(&mut egui::Ui))
         .rounding(egui::Rounding::same(8.0))
         .inner_margin(egui::Margin::same(14.0))
         .show(ui, |ui| {
+            // Frame 默认按子控件收缩；选择器一行较短时会让整个面板变窄。
+            // 统一最小宽度后所有设置卡片与 osu! 风格的整列面板对齐。
+            ui.set_min_width(ui.available_width());
             ui.label(
                 egui::RichText::new(title)
                     .size(14.0)
@@ -124,18 +129,6 @@ fn section(ui: &mut egui::Ui, title: &str, contents: impl FnOnce(&mut egui::Ui))
             ui.add_space(2.0);
             contents(ui);
         });
-}
-
-fn value_row(ui: &mut egui::Ui, left: &str, right: String) {
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(left).size(13.0).color(MUTED));
-        ui.with_layout(
-            egui::Layout::right_to_left(egui::Align::Center),
-            |ui| {
-                ui.label(egui::RichText::new(right).size(13.0).color(TEXT));
-            },
-        );
-    });
 }
 
 fn draw_switch(ui: &mut egui::Ui, id_source: &str, checked: &mut bool, label: &str) {
@@ -190,9 +183,12 @@ fn draw_switch(ui: &mut egui::Ui, id_source: &str, checked: &mut bool, label: &s
 fn draw_slider(ui: &mut egui::Ui, value: &mut f64, range: std::ops::RangeInclusive<f64>) {
     let min = *range.start();
     let max = *range.end();
-    let width = ui.available_width().min(320.0);
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 30.0), egui::Sense::click_and_drag());
-    let track = egui::Rect::from_center_size(rect.center(), egui::vec2(rect.width(), 10.0));
+    let width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(width, 52.0),
+        egui::Sense::click_and_drag(),
+    );
+    let track = rect.shrink2(egui::vec2(0.0, 3.0));
 
     if let Some(pointer) = response.interact_pointer_pos() {
         let progress = ((pointer.x - track.left()) / track.width()).clamp(0.0, 1.0) as f64;
@@ -205,26 +201,28 @@ fn draw_slider(ui: &mut egui::Ui, value: &mut f64, range: std::ops::RangeInclusi
         0.0
     };
     let thumb_x = egui::lerp(track.left()..=track.right(), progress);
-    let fill = egui::Rect::from_min_max(track.left_top(), egui::pos2(thumb_x, track.bottom()));
+    let fill = egui::Rect::from_min_max(
+        track.left_top(),
+        egui::pos2((thumb_x + 8.0).min(track.right()), track.bottom()),
+    );
     let thumb = egui::Rect::from_center_size(
         egui::pos2(thumb_x, rect.center().y),
-        egui::vec2(16.0, 26.0),
+        egui::vec2(18.0, 40.0),
     );
     let track_stroke = if response.hovered() || response.dragged() {
-        egui::Stroke::new(1.0_f32, CONTROL_BORDER)
+        egui::Stroke::new(1.5_f32, CONTROL_BORDER)
     } else {
-        egui::Stroke::new(1.0_f32, RAIL)
+        egui::Stroke::NONE
     };
-    ui.painter().rect_filled(track, 5.0, SLIDER_TRACK);
-    ui.painter().rect_stroke(track, 5.0, track_stroke);
-    ui.painter().rect_filled(fill, 5.0, ACCENT);
-    ui.painter().rect_filled(thumb, 5.0, ACCENT);
-    ui.painter()
-        .rect_stroke(
-            thumb,
-            5.0,
-            egui::Stroke::new(1.0_f32, egui::Color32::WHITE),
-        );
+    ui.painter().rect_filled(track, 8.0, SLIDER_TRACK);
+    ui.painter().rect_stroke(track, 8.0, track_stroke);
+    ui.painter().rect_filled(fill, 8.0, SLIDER_FILL);
+    ui.painter().rect_filled(thumb, 7.0, SLIDER_FILL);
+    let highlight = egui::Rect::from_center_size(
+        egui::pos2(thumb.right() - 5.0, thumb.center().y),
+        egui::vec2(4.0, 28.0),
+    );
+    ui.painter().rect_filled(highlight, 2.0, SLIDER_HIGHLIGHT);
 
     if response.hovered() || response.dragged() {
         ui.output_mut(|output| output.cursor_icon = egui::CursorIcon::PointingHand);
@@ -232,8 +230,22 @@ fn draw_slider(ui: &mut egui::Ui, value: &mut f64, range: std::ops::RangeInclusi
 }
 
 fn draw_volume(ui: &mut egui::Ui, label: &str, value: &mut f64) {
-    value_row(ui, label, format!("{}%", (*value * 100.0).round() as i32));
-    draw_slider(ui, value, 0.0..=1.0);
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.label(egui::RichText::new(label).size(13.0).color(MUTED));
+            ui.label(
+                egui::RichText::new(format!("{}%", (*value * 100.0).round() as i32))
+                    .size(18.0)
+                    .color(TEXT),
+            );
+        });
+        ui.add_space(14.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), 52.0),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| draw_slider(ui, value, 0.0..=1.0),
+        );
+    });
 }
 
 /// 设置线程的控制命令。
@@ -362,8 +374,22 @@ impl eframe::App for SettingsApp {
                 ui.add_space(18.0);
 
                 section(ui, "光标", |ui| {
-                    value_row(ui, "16 - 64", format!("{:.0} px", s.cursor_width));
-                    draw_slider(ui, &mut s.cursor_width, 16.0..=64.0);
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new("光标大小").size(13.0).color(MUTED));
+                            ui.label(
+                                egui::RichText::new(format!("{:.0} px", s.cursor_width))
+                                    .size(18.0)
+                                    .color(TEXT),
+                            );
+                        });
+                        ui.add_space(14.0);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(ui.available_width(), 52.0),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| draw_slider(ui, &mut s.cursor_width, 16.0..=64.0),
+                        );
+                    });
 
                     let reset = ui.add_sized(
                         egui::vec2(96.0, 30.0),
@@ -430,6 +456,10 @@ impl eframe::App for SettingsApp {
                         ui.scope(|ui| {
                             let visuals = &mut ui.style_mut().visuals;
                             visuals.extreme_bg_color = CONTROL_BG;
+                            visuals.window_fill = CONTROL_BG;
+                            visuals.window_stroke = egui::Stroke::new(2.0_f32, CONTROL_BORDER);
+                            visuals.window_rounding = egui::Rounding::same(8.0);
+                            visuals.menu_rounding = egui::Rounding::same(8.0);
                             for widget in [
                                 &mut visuals.widgets.inactive,
                                 &mut visuals.widgets.hovered,
@@ -445,7 +475,8 @@ impl eframe::App for SettingsApp {
                             visuals.widgets.hovered.bg_fill = CONTROL_HOVER;
                             visuals.widgets.active.bg_fill = CONTROL_HOVER;
                             visuals.widgets.open.bg_fill = CONTROL_HOVER;
-                            visuals.selection.bg_fill = ACCENT;
+                            visuals.selection.bg_fill = SLIDER_FILL;
+                            visuals.selection.stroke = egui::Stroke::NONE;
 
                             egui::ComboBox::from_id_source("fullscreen_exception_window")
                                 .selected_text(selected_label)
