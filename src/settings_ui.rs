@@ -282,7 +282,7 @@ fn reset_icon_button(ui: &mut egui::Ui) -> egui::Response {
         egui::pos2(center.x - 3.0, center.y - 8.0),
         egui::pos2(center.x + 4.5, center.y - 7.0),
     ];
-    ui.painter().line(arc.to_vec(), stroke);
+    ui.painter().add(egui::Shape::line(arc.to_vec(), stroke));
     let arrow_tip = arc[6];
     ui.painter().line_segment(
         [arrow_tip, egui::pos2(arrow_tip.x - 1.0, arrow_tip.y + 6.0)],
