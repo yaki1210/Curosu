@@ -632,8 +632,9 @@ impl Overlay {
         }
     }
 
-    /// 依据真实窗口边框返回指向窗口内部的箭头角度。基础图标指向右方：
-    /// 左边框为 0°、右边框为 180°、上/下边框分别为 90°/-90°。
+    /// 依据真实窗口边框返回指向窗口内部的箭头角度。资源的默认箭头本身
+    /// 指向左上（约 -135°），所以不能把目标方向直接当作旋转角度：
+    /// 左/右边框为 135°/-45°，上/下边框为 -135°/45°。
     fn resize_cursor_angle(
         &self,
         cursor_handle: *mut core::ffi::c_void,
@@ -681,24 +682,28 @@ impl Overlay {
             let top = py <= rect.top + border_y;
             let bottom = py >= rect.bottom - border_y;
 
-            // 旋转坐标系的正方向在屏幕坐标中为顺时针，因此四角分别指向
-            // 窗口内部的右下、左下、右上、左上。
+            // 旋转坐标系的正方向在屏幕坐标中为顺时针。以下角度均扣除了
+            // 默认左上箭头的 -135° 朝向，使指针实际朝向窗口内部。
             if left && top {
-                Some(45.0)
-            } else if right && top {
-                Some(135.0)
-            } else if left && bottom {
-                Some(-45.0)
-            } else if right && bottom {
-                Some(-135.0)
-            } else if left {
-                Some(0.0)
-            } else if right {
+                // 左上角 -> 右下。
                 Some(180.0)
-            } else if top {
-                Some(90.0)
-            } else if bottom {
+            } else if right && top {
+                // 右上角 -> 左下。
                 Some(-90.0)
+            } else if left && bottom {
+                // 左下角 -> 右上。
+                Some(90.0)
+            } else if right && bottom {
+                // 右下角 -> 左上。
+                Some(0.0)
+            } else if left {
+                Some(135.0)
+            } else if right {
+                Some(-45.0)
+            } else if top {
+                Some(-135.0)
+            } else if bottom {
+                Some(45.0)
             } else {
                 None
             }
