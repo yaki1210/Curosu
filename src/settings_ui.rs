@@ -31,6 +31,8 @@ const CONTROL_BORDER: egui::Color32 = egui::Color32::from_rgb(255, 116, 181);
 const SLIDER_TRACK: egui::Color32 = egui::Color32::from_rgb(29, 29, 36);
 const SLIDER_FILL: egui::Color32 = egui::Color32::from_rgb(205, 77, 162);
 const SLIDER_HIGHLIGHT: egui::Color32 = egui::Color32::from_rgb(255, 151, 212);
+/// 下拉列表滚动条的浅紫把手，参考 osu! 的宽圆角滚动条。
+const SCROLL_HANDLE: egui::Color32 = egui::Color32::from_rgb(220, 205, 232);
 
 /// 加载中文字体（Microsoft YaHei）注入 egui。
 fn setup_fonts(ctx: &egui::Context) {
@@ -271,25 +273,42 @@ fn reset_icon_button(ui: &mut egui::Ui) -> egui::Response {
     }
 
     // 不依赖字体的回转箭头，避免 Microsoft YaHei 缺少 ↶ 字形而显示方块。
+    // 两段贝塞尔曲线保持圆弧平滑，避免折线在小尺寸下看起来像损坏的图标。
     let center = rect.center();
     let stroke = egui::Stroke::new(2.2_f32, ACCENT);
-    let arc = [
-        egui::pos2(center.x + 8.0, center.y + 5.0),
-        egui::pos2(center.x + 5.5, center.y + 8.0),
-        egui::pos2(center.x - 3.0, center.y + 8.0),
-        egui::pos2(center.x - 8.0, center.y + 3.0),
-        egui::pos2(center.x - 8.0, center.y - 3.5),
-        egui::pos2(center.x - 3.0, center.y - 8.0),
-        egui::pos2(center.x + 4.5, center.y - 7.0),
-    ];
-    ui.painter().add(egui::Shape::line(arc.to_vec(), stroke));
-    let arrow_tip = arc[6];
+    ui.painter().add(egui::Shape::CubicBezier(
+        egui::epaint::CubicBezierShape::from_points_stroke(
+            [
+                egui::pos2(center.x + 8.0, center.y + 3.0),
+                egui::pos2(center.x + 8.0, center.y + 8.0),
+                egui::pos2(center.x - 8.0, center.y + 9.0),
+                egui::pos2(center.x - 8.0, center.y),
+            ],
+            false,
+            egui::Color32::TRANSPARENT,
+            stroke,
+        ),
+    ));
+    ui.painter().add(egui::Shape::CubicBezier(
+        egui::epaint::CubicBezierShape::from_points_stroke(
+            [
+                egui::pos2(center.x - 8.0, center.y),
+                egui::pos2(center.x - 8.0, center.y - 8.0),
+                egui::pos2(center.x + 1.0, center.y - 10.0),
+                egui::pos2(center.x + 6.0, center.y - 6.0),
+            ],
+            false,
+            egui::Color32::TRANSPARENT,
+            stroke,
+        ),
+    ));
+    let arrow_tip = egui::pos2(center.x + 6.0, center.y - 6.0);
     ui.painter().line_segment(
-        [arrow_tip, egui::pos2(arrow_tip.x - 1.0, arrow_tip.y + 6.0)],
+        [arrow_tip, egui::pos2(center.x + 0.5, center.y - 6.0)],
         stroke,
     );
     ui.painter().line_segment(
-        [arrow_tip, egui::pos2(arrow_tip.x - 5.0, arrow_tip.y + 1.5)],
+        [arrow_tip, egui::pos2(center.x + 5.5, center.y - 0.5)],
         stroke,
     );
     response.on_hover_text("恢复默认")
@@ -504,6 +523,15 @@ impl eframe::App for SettingsApp {
                         ui.scope(|ui| {
                             ui.style_mut().spacing.interact_size.y = 52.0;
                             ui.style_mut().spacing.button_padding = egui::vec2(10.0, 8.0);
+                            // ComboBox 弹出层内部使用 ScrollArea；仅在这个 scope 中
+                            // 改成 osu! 风格的宽、始终可见的圆角滚动条。
+                            let scroll = &mut ui.style_mut().spacing.scroll;
+                            scroll.floating = false;
+                            scroll.bar_width = 18.0;
+                            scroll.handle_min_length = 44.0;
+                            scroll.bar_inner_margin = 4.0;
+                            scroll.bar_outer_margin = 2.0;
+                            scroll.foreground_color = true;
                             let visuals = &mut ui.style_mut().visuals;
                             visuals.extreme_bg_color = CONTROL_BG;
                             visuals.window_fill = CONTROL_BG;
@@ -525,21 +553,27 @@ impl eframe::App for SettingsApp {
                             visuals.widgets.hovered.bg_fill = CONTROL_HOVER;
                             visuals.widgets.active.bg_fill = CONTROL_HOVER;
                             visuals.widgets.open.bg_fill = CONTROL_HOVER;
+                            // ScrollArea 在 foreground_color 模式下使用 fg_stroke 作把手。
+                            // 保持下拉本身的深色背景，同时获得参考图那种浅紫宽把手。
+                            visuals.widgets.inactive.fg_stroke.color = SCROLL_HANDLE;
+                            visuals.widgets.hovered.fg_stroke.color = SCROLL_HANDLE;
+                            visuals.widgets.active.fg_stroke.color = SCROLL_HANDLE;
                             visuals.selection.bg_fill = SLIDER_FILL;
                             visuals.selection.stroke = egui::Stroke::NONE;
 
                             egui::ComboBox::from_id_source("fullscreen_exception_window")
-                                .selected_text(selected_label)
+                                .selected_text(egui::RichText::new(selected_label).color(TEXT))
                                 .width((ui.available_width() - 64.0).max(80.0))
                                 .height(260.0)
-                                .icon(|ui, rect, visuals, is_open, _| {
+                                .icon(|ui, rect, _visuals, is_open, _| {
                                     let center = rect.center();
                                     let direction = if is_open { -1.0 } else { 1.0 };
                                     let left = egui::pos2(center.x - 5.0, center.y - 2.5 * direction);
                                     let middle = egui::pos2(center.x, center.y + 2.5 * direction);
                                     let right = egui::pos2(center.x + 5.0, center.y - 2.5 * direction);
-                                    ui.painter().line_segment([left, middle], visuals.fg_stroke);
-                                    ui.painter().line_segment([middle, right], visuals.fg_stroke);
+                                    let stroke = egui::Stroke::new(2.0_f32, TEXT);
+                                    ui.painter().line_segment([left, middle], stroke);
+                                    ui.painter().line_segment([middle, right], stroke);
                                 })
                                 .show_ui(ui, |ui| {
                                     for window in &self.selectable_windows {
