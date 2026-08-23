@@ -27,8 +27,9 @@ use windows_sys::Win32::UI::HiDpi::{
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, FindWindowW, GetAncestor, GetCursorInfo,
-    GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, FindWindowW, GetAncestor, GetClassNameW,
+    GetCursorInfo, GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
+    GetWindowRect,
     IsWindowVisible, KillTimer, LoadIconW, PostQuitMessage, RegisterClassW, SetTimer, SetWindowPos,
     ShowWindow, TranslateMessage, WindowFromPoint, CS_HREDRAW, CS_VREDRAW, CURSORINFO, GA_ROOT,
     GWL_STYLE, HWND_TOPMOST, MSG, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE,
@@ -801,11 +802,11 @@ fn rand_f() -> f64 {
     frac.abs()
 }
 
-/// 返回前台窗口是否几乎完全覆盖其所在显示器。允许窗口阴影/不可见边框带来的
-/// 8px 误差，避免将普通最大化窗口（仅覆盖工作区）误判为全屏。
+/// 返回前台窗口是否需要全屏降级。浏览器全屏视频仍由 DWM/浏览器窗口承载，
+/// 因而保留动画覆盖层；其余覆盖显示器的程序（例如游戏）则恢复系统鼠标。
 unsafe fn foreground_window_covers_monitor() -> bool {
     let hwnd = GetForegroundWindow();
-    if hwnd.is_null() || IsWindowVisible(hwnd) == 0 {
+    if hwnd.is_null() || IsWindowVisible(hwnd) == 0 || is_browser_window(hwnd) {
         return false;
     }
     let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
@@ -828,6 +829,20 @@ unsafe fn foreground_window_covers_monitor() -> bool {
         && window_rect.top <= monitor_rect.top + EDGE_TOLERANCE
         && window_rect.right >= monitor_rect.right - EDGE_TOLERANCE
         && window_rect.bottom >= monitor_rect.bottom - EDGE_TOLERANCE
+}
+
+/// Chromium 系浏览器共用 Chrome_WidgetWin_1；Firefox 使用 MozillaWindowClass。
+/// 这些窗口的视频全屏无需禁用 Curosu 动画覆盖层。
+unsafe fn is_browser_window(hwnd: HWND) -> bool {
+    let mut class_name = [0u16; 64];
+    let len = GetClassNameW(hwnd, class_name.as_mut_ptr(), class_name.len() as i32);
+    if len <= 0 {
+        return false;
+    }
+    matches!(
+        String::from_utf16_lossy(&class_name[..len as usize]).as_str(),
+        "Chrome_WidgetWin_1" | "MozillaWindowClass"
+    )
 }
 
 /// DWM 缩略图窗口不是稳定的可枚举 Win32 窗口。基于稳定的 Shell 任务栏矩形，
