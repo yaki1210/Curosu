@@ -24,7 +24,7 @@ use windows_sys::Win32::UI::HiDpi::{
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, FindWindowW, GetAncestor, GetClassNameW,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, FindWindowW, GetAncestor,
     GetCursorInfo, GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindow,
     GetWindowLongPtrW, GetWindowRect, IsWindowVisible, KillTimer, LoadIconW, PostQuitMessage,
     RegisterClassW, SetTimer, SetWindowPos, ShowWindow, TranslateMessage, WindowFromPoint,
@@ -384,7 +384,7 @@ impl Overlay {
     /// DWM 的任务栏缩略图不和普通桌面窗口共享可控的 Z 序，因此覆盖层会被
     /// 它遮住。光标位于缩略图时临时改用系统原生静态 .cur；离开后恢复动画。
     fn update_taskbar_preview_state(&mut self) {
-        let over_preview = unsafe { is_pointer_over_taskbar_thumbnail() };
+        let over_preview = unsafe { is_taskbar_thumbnail_visible() };
         if over_preview && !self.suspended_for_taskbar_preview {
             log("taskbar thumbnail entered; switching to static fallback cursor");
             self.suspended_for_taskbar_preview = true;
@@ -757,34 +757,14 @@ fn rand_f() -> f64 {
     frac.abs()
 }
 
-unsafe fn is_task_list_thumbnail(hwnd: HWND) -> bool {
-    if hwnd.is_null() {
-        return false;
-    }
-    let mut buf = [0u16; 256];
-    let n = GetClassNameW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
-    let name = String::from_utf16_lossy(&buf[..n as usize]);
-    name == "TaskListThumbnailWnd"
-}
-
-unsafe fn is_pointer_over_taskbar_thumbnail() -> bool {
-    let (cx, cy) = hook::cursor_pos();
-    let point = windows_sys::Win32::Foundation::POINT { x: cx, y: cy };
-    let window = WindowFromPoint(point);
-    if is_task_list_thumbnail(GetAncestor(window, GA_ROOT)) {
-        return true;
-    }
-
+/// 缩略图出现的初始阶段，DWM 可能不把它作为鼠标命中窗口返回；因此不能依赖
+/// `WindowFromPoint` 或“光标已经进入缩略图”的条件。只要可见的缩略图窗口存在，
+/// 就切换到系统光标，等窗口消失再恢复覆盖层。
+unsafe fn is_taskbar_thumbnail_visible() -> bool {
     let name: Vec<u16> = "TaskListThumbnailWnd\0".encode_utf16().collect();
     let mut preview = FindWindowW(name.as_ptr(), std::ptr::null());
     while !preview.is_null() {
-        let mut rect: windows_sys::Win32::Foundation::RECT = std::mem::zeroed();
-        if GetWindowRect(preview, &mut rect) != 0
-            && cx >= rect.left
-            && cx < rect.right
-            && cy >= rect.top
-            && cy < rect.bottom
-        {
+        if IsWindowVisible(preview) != 0 {
             return true;
         }
         preview = GetWindow(preview, GW_HWNDNEXT);
