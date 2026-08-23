@@ -7,14 +7,19 @@ use crate::settings::Settings;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM};
+use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows_sys::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+};
 use windows_sys::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, FindWindowW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
-    PostMessageW, SetForegroundWindow, ShowWindow, SW_HIDE, SW_SHOW,
+    CallWindowProcW, EnumWindows, FindWindowW, GetWindowRect, GetWindowTextW,
+    GetWindowThreadProcessId, GWLP_WNDPROC, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT,
+    HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, IsWindowVisible, PostMessageW, SetForegroundWindow,
+    SetWindowLongPtrW, ShowWindow, SW_HIDE, SW_SHOW, WM_NCHITTEST, WNDPROC,
 };
 
 const APP_ICON_ICO: &[u8] = include_bytes!("../assets/icon.ico");
@@ -359,6 +364,49 @@ fn reset_icon_button(ui: &mut egui::Ui) -> egui::Response {
     response.on_hover_text("恢复默认")
 }
 
+/// 自绘标题栏按钮（最小化/关闭）。图标用 painter 线段绘制，不依赖字体字形。
+/// 悬停底色：最小化 CONTROL_HOVER，关闭 SLIDER_FILL（滑条填充粉红）。
+fn titlebar_button(ui: &mut egui::Ui, close: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(44.0, 40.0), egui::Sense::click());
+    let hovered = response.hovered();
+    if hovered {
+        let bg = if close { SLIDER_FILL } else { CONTROL_HOVER };
+        ui.painter().rect_filled(rect, 0.0, bg);
+        ui.output_mut(|output| output.cursor_icon = egui::CursorIcon::PointingHand);
+    }
+
+    let stroke = egui::Stroke::new(2.0_f32, if hovered { TEXT } else { MUTED });
+    let center = rect.center();
+    if close {
+        // ×：两条对角线
+        let r = 6.0;
+        ui.painter().line_segment(
+            [
+                egui::pos2(center.x - r, center.y - r),
+                egui::pos2(center.x + r, center.y + r),
+            ],
+            stroke,
+        );
+        ui.painter().line_segment(
+            [
+                egui::pos2(center.x - r, center.y + r),
+                egui::pos2(center.x + r, center.y - r),
+            ],
+            stroke,
+        );
+    } else {
+        // —：最小化横线
+        ui.painter().line_segment(
+            [
+                egui::pos2(center.x - 6.0, center.y),
+                egui::pos2(center.x + 6.0, center.y),
+            ],
+            stroke,
+        );
+    }
+    response
+}
+
 /// 设置线程的控制命令。
 pub enum UiCmd {
     /// 显示并聚焦设置窗口（窗口未创建时由 egui 命令兜底）。
@@ -371,6 +419,90 @@ pub enum UiCmd {
 /// 用原生 ShowWindow 控制显示比 egui 的 ViewportCommand::Visible 更可靠，
 /// 避免隐藏后事件循环不再处理命令导致"关了就打不开"。
 static SETTINGS_HWND: AtomicUsize = AtomicUsize::new(0);
+
+/// winit 0.29 无装饰窗口不处理 WM_NCHITTEST，全窗口都是客户区，
+/// 边缘拖拽无法缩放。子类化窗口过程，在 8 物理像素边缘返回缩放命中码。
+static PREV_WNDPROC: AtomicUsize = AtomicUsize::new(0);
+/// 缩放热区宽度（物理像素，接近系统默认边框 4+4）。
+const RESIZE_BORDER_PX: i32 = 8;
+
+unsafe extern "system" fn settings_wndproc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if msg == WM_NCHITTEST {
+        // lparam 为屏幕物理坐标（两个有符号 16 位）
+        let x = (lparam as u16) as i16 as i32;
+        let y = ((lparam as usize) >> 16) as u16 as i16 as i32;
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if GetWindowRect(hwnd, &mut rect) != 0 {
+            let left = x - rect.left;
+            let right = rect.right - x;
+            let top = y - rect.top;
+            let bottom = rect.bottom - y;
+            let hit = if top < RESIZE_BORDER_PX {
+                if left < RESIZE_BORDER_PX {
+                    HTTOPLEFT
+                } else if right < RESIZE_BORDER_PX {
+                    HTTOPRIGHT
+                } else {
+                    HTTOP
+                }
+            } else if bottom < RESIZE_BORDER_PX {
+                if left < RESIZE_BORDER_PX {
+                    HTBOTTOMLEFT
+                } else if right < RESIZE_BORDER_PX {
+                    HTBOTTOMRIGHT
+                } else {
+                    HTBOTTOM
+                }
+            } else if left < RESIZE_BORDER_PX {
+                HTLEFT
+            } else if right < RESIZE_BORDER_PX {
+                HTRIGHT
+            } else {
+                0
+            };
+            if hit != 0 {
+                return hit as LRESULT;
+            }
+        }
+    }
+    let prev = PREV_WNDPROC.load(Ordering::SeqCst);
+    let prev_proc: WNDPROC = Some(std::mem::transmute(prev));
+    CallWindowProcW(prev_proc, hwnd, msg, wparam, lparam)
+}
+
+/// 子类化（在 winit 事件循环线程内调用，同线程安全）。
+unsafe fn install_resize_subclass(hwnd: HWND) {
+    let old = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, settings_wndproc as isize);
+    if old != 0 {
+        PREV_WNDPROC.store(old as usize, Ordering::SeqCst);
+    } else {
+        log("settings_ui: resize subclass failed");
+    }
+}
+
+/// Windows 11+ DWM 圆角；Windows 10 不支持该属性，失败静默忽略（保持方角）。
+unsafe fn apply_win11_rounded_corners(hwnd: HWND) {
+    let preference: i32 = DWMWCP_ROUND;
+    let hr = DwmSetWindowAttribute(
+        hwnd,
+        DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+        &preference as *const i32 as *const core::ffi::c_void,
+        std::mem::size_of::<i32>() as u32,
+    );
+    if hr != 0 {
+        log("settings_ui: DWM rounded corners unavailable (pre-Win11)");
+    }
+}
 
 struct SettingsApp {
     settings: Arc<Mutex<Settings>>,
@@ -412,6 +544,8 @@ impl SettingsApp {
             if !w.is_null() {
                 SETTINGS_HWND.store(w as usize, Ordering::SeqCst);
                 self.settings_hwnd_found = true;
+                apply_win11_rounded_corners(w);
+                install_resize_subclass(w);
             }
         }
     }
@@ -469,22 +603,52 @@ impl eframe::App for SettingsApp {
         };
         let before = s.clone();
 
+        // 单个 CentralPanel：标题栏作为面板内首行，与内容区共用同一 fill，
+        // 物理上只有一个填充矩形，杜绝面板接缝。按钮悬停填充从窗口最顶部
+        // (y=0) 开始。左侧标题区按住可拖动窗口，右侧为最小化/关闭按钮。
         egui::CentralPanel::default()
-            .frame(
-                egui::Frame::none()
-                    .fill(BACKGROUND)
-                    .inner_margin(egui::Margin::same(20.0)),
-            )
+            .frame(egui::Frame::none().fill(BACKGROUND))
             .show(ctx, |ui| {
-                ui.label(
-                    egui::RichText::new("设置")
-                        .size(24.0)
-                        .strong()
-                        .color(ACCENT),
-                );
-                ui.add_space(18.0);
+                ui.horizontal(|ui| {
+                    // 按钮间零间距，两个 44px 按钮无缝紧贴右上角。
+                    ui.style_mut().spacing.item_spacing.x = 0.0;
+                    let drag_width = (ui.available_width() - 88.0).max(60.0);
+                    let (rect, response) = ui.allocate_exact_size(
+                        egui::vec2(drag_width, 40.0),
+                        egui::Sense::click_and_drag(),
+                    );
+                    ui.painter().text(
+                        egui::pos2(rect.left() + 20.0, rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        "设置",
+                        egui::FontId::proportional(24.0),
+                        ACCENT,
+                    );
+                    if response.drag_started() {
+                        ui.ctx()
+                            .send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    }
+                    if titlebar_button(ui, false).clicked() {
+                        ui.ctx()
+                            .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                    }
+                    if titlebar_button(ui, true).clicked() {
+                        // Close 命令下一帧触发 close_requested()，由 handle_commands
+                        // 拦截为 CancelClose + SW_HIDE，保持"关闭=隐藏"语义。
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
 
-                // 例外列表会随着用户添加持续增长；主体必须在固定大小的设置窗口内
+                // 内容区：内边距由内层透明 Frame 提供，与标题栏共用 BACKGROUND。
+                egui::Frame::none()
+                    .inner_margin(egui::Margin {
+                        left: 20.0,
+                        right: 20.0,
+                        top: 18.0,
+                        bottom: 20.0,
+                    })
+                    .show(ui, |ui| {
+                // 例外列表会随着用户添加持续增长；主体必须在设置窗口内
                 // 滚动，而不是让底部内容被裁掉。
                 egui::ScrollArea::vertical()
                     .id_source("settings_content_scroll")
@@ -679,6 +843,7 @@ impl eframe::App for SettingsApp {
                     }
                 });
                     });
+                    });
             });
 
         if s != before {
@@ -814,7 +979,12 @@ fn settings_thread(rx: Receiver<UiCmd>, settings: Arc<Mutex<Settings>>, hwnd_usi
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([460.0, 780.0])
                 .with_title("Curosu 设置")
-                .with_resizable(false)
+                // 隐藏系统标题栏，改由顶部自绘标题栏接管（拖动/最小化/关闭）。
+                .with_decorations(false)
+                // 无装饰窗口仍可拖拽边缘缩放：winit 保留 WS_SIZEBOX 缩放边框，
+                // 仅通过 WM_NCCALCSIZE 抹掉可见边框。
+                .with_resizable(true)
+                .with_min_inner_size([380.0, 480.0])
                 .with_minimize_button(true)
                 .with_maximize_button(false)
                 // 初始隐藏，由 open_settings 发送 Show 后再显示。
