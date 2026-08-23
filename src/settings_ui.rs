@@ -64,6 +64,15 @@ fn setup_style(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
     style.spacing.item_spacing = egui::vec2(10.0, 8.0);
     style.spacing.slider_width = 320.0;
+    // ComboBox 的弹出层由 Context 样式创建，不会继承局部 ui.scope。
+    // 因此把滚动条规格放在全局样式，保证窗口列表也使用 osu! 风格的宽圆角把手。
+    let scroll = &mut style.spacing.scroll;
+    scroll.floating = false;
+    scroll.bar_width = 18.0;
+    scroll.handle_min_length = 44.0;
+    scroll.bar_inner_margin = 4.0;
+    scroll.bar_outer_margin = 2.0;
+    scroll.foreground_color = true;
 
     let mut visuals = egui::Visuals::dark();
     visuals.override_text_color = Some(TEXT);
@@ -79,6 +88,11 @@ fn setup_style(ctx: &egui::Context) {
     visuals.widgets.active.fg_stroke.color = TEXT;
     visuals.selection.bg_fill = ACCENT;
     visuals.selection.stroke.color = TEXT;
+    visuals.extreme_bg_color = CONTROL_BG;
+    visuals.window_fill = CONTROL_BG;
+    visuals.window_stroke = egui::Stroke::new(2.0_f32, CONTROL_BORDER);
+    visuals.window_rounding = egui::Rounding::same(8.0);
+    visuals.menu_rounding = egui::Rounding::same(8.0);
     // 显示"起点→滑块"的填充段（用 selection.bg_fill=ACCENT 粉色），
     // 对齐原版 WPF 滑条"粉填充 + 灰轨道"外观。
     visuals.slider_trailing_fill = true;
@@ -302,15 +316,16 @@ fn reset_icon_button(ui: &mut egui::Ui) -> egui::Response {
             stroke,
         ),
     ));
-    let arrow_tip = egui::pos2(center.x + 6.0, center.y - 6.0);
-    ui.painter().line_segment(
-        [arrow_tip, egui::pos2(center.x + 0.5, center.y - 6.0)],
-        stroke,
-    );
-    ui.painter().line_segment(
-        [arrow_tip, egui::pos2(center.x + 5.5, center.y - 0.5)],
-        stroke,
-    );
+    // 实心、加大的箭头让 36px 按钮内的图标一眼能辨认为“恢复默认”。
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(center.x + 9.5, center.y - 7.0),
+            egui::pos2(center.x + 2.0, center.y - 11.0),
+            egui::pos2(center.x + 2.0, center.y - 3.0),
+        ],
+        ACCENT,
+        egui::Stroke::NONE,
+    ));
     response.on_hover_text("恢复默认")
 }
 
@@ -520,18 +535,16 @@ impl eframe::App for SettingsApp {
                             })
                             .map(|window| window.label.as_str())
                             .unwrap_or("选择窗口…");
-                        ui.scope(|ui| {
+                        // ComboBox::width 是最小宽度而不是最大宽度。把它放进固定宽度
+                        // 的子 UI 并启用截断，长窗口标题不会再挤掉“添加”按钮。
+                        let selector_width =
+                            (ui.available_width() - 58.0 - ui.spacing().item_spacing.x).max(80.0);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(selector_width, 52.0),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| ui.scope(|ui| {
                             ui.style_mut().spacing.interact_size.y = 52.0;
                             ui.style_mut().spacing.button_padding = egui::vec2(10.0, 8.0);
-                            // ComboBox 弹出层内部使用 ScrollArea；仅在这个 scope 中
-                            // 改成 osu! 风格的宽、始终可见的圆角滚动条。
-                            let scroll = &mut ui.style_mut().spacing.scroll;
-                            scroll.floating = false;
-                            scroll.bar_width = 18.0;
-                            scroll.handle_min_length = 44.0;
-                            scroll.bar_inner_margin = 4.0;
-                            scroll.bar_outer_margin = 2.0;
-                            scroll.foreground_color = true;
                             let visuals = &mut ui.style_mut().visuals;
                             visuals.extreme_bg_color = CONTROL_BG;
                             visuals.window_fill = CONTROL_BG;
@@ -563,8 +576,9 @@ impl eframe::App for SettingsApp {
 
                             egui::ComboBox::from_id_source("fullscreen_exception_window")
                                 .selected_text(egui::RichText::new(selected_label).color(TEXT))
-                                .width((ui.available_width() - 64.0).max(80.0))
+                                .width(selector_width)
                                 .height(260.0)
+                                .truncate()
                                 .icon(|ui, rect, _visuals, is_open, _| {
                                     let center = rect.center();
                                     let direction = if is_open { -1.0 } else { 1.0 };
@@ -584,7 +598,8 @@ impl eframe::App for SettingsApp {
                                         );
                                     }
                                 });
-                        });
+                            }),
+                        );
 
                         let can_add = self.selected_window_executable.is_some();
                         if ui
