@@ -382,9 +382,10 @@ impl Overlay {
     }
 
     /// DWM 的任务栏缩略图不和普通桌面窗口共享可控的 Z 序，因此覆盖层会被
-    /// 它遮住。光标位于缩略图时临时改用系统原生静态 .cur；离开后恢复动画。
+    /// 它遮住。光标进入系统任务栏的第一帧即切换到系统原生静态 .cur，避免等待
+    /// DWM 缩略图创建或参与命中测试；离开任务栏/缩略图后恢复动画。
     fn update_taskbar_preview_state(&mut self) {
-        let over_preview = unsafe { is_taskbar_thumbnail_visible() };
+        let over_preview = unsafe { is_in_taskbar_preview_region() };
         if over_preview && !self.suspended_for_taskbar_preview {
             log("taskbar thumbnail entered; switching to static fallback cursor");
             self.suspended_for_taskbar_preview = true;
@@ -757,10 +758,14 @@ fn rand_f() -> f64 {
     frac.abs()
 }
 
-/// 缩略图出现的初始阶段，DWM 可能不把它作为鼠标命中窗口返回；因此不能依赖
-/// `WindowFromPoint` 或“光标已经进入缩略图”的条件。只要可见的缩略图窗口存在，
-/// 就切换到系统光标，等窗口消失再恢复覆盖层。
-unsafe fn is_taskbar_thumbnail_visible() -> bool {
+/// 缩略图出现的初始阶段，DWM 可能不把它作为鼠标命中窗口返回，甚至不会暴露
+/// `TaskListThumbnailWnd`。任务栏本体是稳定的 Shell 窗口，所以在光标到达
+/// `Shell_TrayWnd` 时提前启用静态光标。
+unsafe fn is_in_taskbar_preview_region() -> bool {
+    if is_cursor_over_window_class("Shell_TrayWnd") {
+        return true;
+    }
+
     let name: Vec<u16> = "TaskListThumbnailWnd\0".encode_utf16().collect();
     let mut preview = FindWindowW(name.as_ptr(), std::ptr::null());
     while !preview.is_null() {
@@ -770,4 +775,20 @@ unsafe fn is_taskbar_thumbnail_visible() -> bool {
         preview = GetWindow(preview, GW_HWNDNEXT);
     }
     false
+}
+
+unsafe fn is_cursor_over_window_class(class_name: &str) -> bool {
+    let mut class_name: Vec<u16> = class_name.encode_utf16().collect();
+    class_name.push(0);
+    let hwnd = FindWindowW(class_name.as_ptr(), std::ptr::null());
+    if hwnd.is_null() || IsWindowVisible(hwnd) == 0 {
+        return false;
+    }
+
+    let mut rect: windows_sys::Win32::Foundation::RECT = std::mem::zeroed();
+    if GetWindowRect(hwnd, &mut rect) == 0 {
+        return false;
+    }
+    let (cx, cy) = hook::cursor_pos();
+    cx >= rect.left && cx < rect.right && cy >= rect.top && cy < rect.bottom
 }
