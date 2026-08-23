@@ -632,9 +632,8 @@ impl Overlay {
         }
     }
 
-    /// 依据真实窗口边框返回指向窗口内部的箭头角度。默认光标的视觉主轴
-    /// 实际朝上（-90°），不是 45° 对角线；因此须先扣除这个基准方向：
-    /// 左/右边框为 90°/-90°，上/下边框为 180°/0°。
+    /// 依据真实窗口边框返回指向窗口内部的箭头角度。默认光标的视觉主轴为
+    /// 30°，所以每个目标方向都必须减去这 30°，不能直接使用目标方向。
     fn resize_cursor_angle(
         &self,
         cursor_handle: *mut core::ffi::c_void,
@@ -683,27 +682,27 @@ impl Overlay {
             let bottom = py >= rect.bottom - border_y;
 
             // 旋转坐标系的正方向在屏幕坐标中为顺时针。以下角度均扣除了
-            // 默认向上箭头的 -90° 朝向，使指针实际朝向窗口内部。
+            // 默认光标的 30° 朝向，使指针实际朝向窗口内部。
             if left && top {
                 // 左上角 -> 右下。
-                Some(135.0)
+                Some(15.0)
             } else if right && top {
                 // 右上角 -> 左下。
-                Some(-135.0)
+                Some(105.0)
             } else if left && bottom {
                 // 左下角 -> 右上。
-                Some(45.0)
+                Some(-75.0)
             } else if right && bottom {
                 // 右下角 -> 左上。
-                Some(-45.0)
+                Some(-165.0)
             } else if left {
-                Some(90.0)
+                Some(-30.0)
             } else if right {
-                Some(-90.0)
+                Some(150.0)
             } else if top {
-                Some(180.0)
+                Some(60.0)
             } else if bottom {
-                Some(0.0)
+                Some(-120.0)
             } else {
                 None
             }
