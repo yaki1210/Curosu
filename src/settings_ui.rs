@@ -200,7 +200,13 @@ fn draw_slider(ui: &mut egui::Ui, value: &mut f64, range: std::ops::RangeInclusi
     } else {
         0.0
     };
-    let thumb_x = egui::lerp(track.left()..=track.right(), progress);
+    // 把手宽 18px，中心点必须留出两端各半个把手的空间，否则 0%/100% 时会
+    // 伸出滑轨。输入仍按完整轨道映射，方便点击两端直接设为最小/最大值。
+    let thumb_half_width = 9.0;
+    let thumb_x = egui::lerp(
+        (track.left() + thumb_half_width)..=(track.right() - thumb_half_width),
+        progress,
+    );
     let fill = egui::Rect::from_min_max(
         track.left_top(),
         egui::pos2((thumb_x + 8.0).min(track.right()), track.bottom()),
@@ -258,13 +264,35 @@ fn accent_button(ui: &mut egui::Ui, label: &str, size: egui::Vec2) -> egui::Resp
 }
 
 fn reset_icon_button(ui: &mut egui::Ui) -> egui::Response {
-    ui.add_sized(
-        egui::vec2(36.0, 52.0),
-        egui::Button::new(egui::RichText::new("↶").size(26.0).color(ACCENT))
-            .fill(CONTROL_BG)
-            .stroke(egui::Stroke::NONE),
-    )
-    .on_hover_text("恢复默认")
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(36.0, 52.0), egui::Sense::click());
+    if response.hovered() {
+        ui.painter().rect_filled(rect, 6.0, CONTROL_HOVER);
+        ui.output_mut(|output| output.cursor_icon = egui::CursorIcon::PointingHand);
+    }
+
+    // 不依赖字体的回转箭头，避免 Microsoft YaHei 缺少 ↶ 字形而显示方块。
+    let center = rect.center();
+    let stroke = egui::Stroke::new(2.2_f32, ACCENT);
+    let arc = [
+        egui::pos2(center.x + 8.0, center.y + 5.0),
+        egui::pos2(center.x + 5.5, center.y + 8.0),
+        egui::pos2(center.x - 3.0, center.y + 8.0),
+        egui::pos2(center.x - 8.0, center.y + 3.0),
+        egui::pos2(center.x - 8.0, center.y - 3.5),
+        egui::pos2(center.x - 3.0, center.y - 8.0),
+        egui::pos2(center.x + 4.5, center.y - 7.0),
+    ];
+    ui.painter().line(arc.to_vec(), stroke);
+    let arrow_tip = arc[6];
+    ui.painter().line_segment(
+        [arrow_tip, egui::pos2(arrow_tip.x - 1.0, arrow_tip.y + 6.0)],
+        stroke,
+    );
+    ui.painter().line_segment(
+        [arrow_tip, egui::pos2(arrow_tip.x - 5.0, arrow_tip.y + 1.5)],
+        stroke,
+    );
+    response.on_hover_text("恢复默认")
 }
 
 /// 设置线程的控制命令。
