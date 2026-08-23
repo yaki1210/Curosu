@@ -248,6 +248,25 @@ fn draw_volume(ui: &mut egui::Ui, label: &str, value: &mut f64) {
     });
 }
 
+fn accent_button(ui: &mut egui::Ui, label: &str, size: egui::Vec2) -> egui::Response {
+    ui.add_sized(
+        size,
+        egui::Button::new(egui::RichText::new(label).color(TEXT))
+            .fill(ACCENT)
+            .stroke(egui::Stroke::NONE),
+    )
+}
+
+fn reset_icon_button(ui: &mut egui::Ui) -> egui::Response {
+    ui.add_sized(
+        egui::vec2(36.0, 52.0),
+        egui::Button::new(egui::RichText::new("↶").size(26.0).color(ACCENT))
+            .fill(CONTROL_BG)
+            .stroke(egui::Stroke::NONE),
+    )
+    .on_hover_text("恢复默认")
+}
+
 /// 设置线程的控制命令。
 pub enum UiCmd {
     /// 显示并聚焦设置窗口（窗口未创建时由 egui 命令兜底）。
@@ -384,22 +403,17 @@ impl eframe::App for SettingsApp {
                             );
                         });
                         ui.add_space(14.0);
+                        let slider_width = (ui.available_width() - 42.0).max(48.0);
                         ui.allocate_ui_with_layout(
-                            egui::vec2(ui.available_width(), 52.0),
+                            egui::vec2(slider_width, 52.0),
                             egui::Layout::top_down(egui::Align::Min),
                             |ui| draw_slider(ui, &mut s.cursor_width, 16.0..=64.0),
                         );
+                        ui.add_space(6.0);
+                        if reset_icon_button(ui).clicked() {
+                            s.cursor_width = 30.0;
+                        }
                     });
-
-                    let reset = ui.add_sized(
-                        egui::vec2(96.0, 30.0),
-                        egui::Button::new(egui::RichText::new("恢复默认").color(TEXT))
-                            .fill(ACCENT)
-                            .stroke(egui::Stroke::NONE),
-                    );
-                    if reset.clicked() {
-                        s.cursor_width = 30.0;
-                    }
                 });
                 ui.add_space(12.0);
 
@@ -433,15 +447,21 @@ impl eframe::App for SettingsApp {
                 ui.add_space(12.0);
 
                 section(ui, "全屏例外", |ui| {
-                    ui.label(
-                        egui::RichText::new("选择后添加：该程序全屏时仍显示动画光标")
-                            .size(12.0)
-                            .color(MUTED),
-                    );
                     ui.horizontal(|ui| {
-                        if ui.button("刷新窗口列表").clicked() {
-                            self.refresh_selectable_windows();
-                        }
+                        ui.label(
+                            egui::RichText::new("选择后添加：该程序全屏时仍显示动画光标")
+                                .size(12.0)
+                                .color(MUTED),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if accent_button(ui, "刷新窗口列表", egui::vec2(96.0, 28.0)).clicked() {
+                                self.refresh_selectable_windows();
+                            }
+                        });
+                    });
+                    ui.add_space(4.0);
+
+                    ui.horizontal(|ui| {
 
                         let selected_label = self
                             .selected_window_executable
@@ -454,6 +474,8 @@ impl eframe::App for SettingsApp {
                             .map(|window| window.label.as_str())
                             .unwrap_or("选择窗口…");
                         ui.scope(|ui| {
+                            ui.style_mut().spacing.interact_size.y = 52.0;
+                            ui.style_mut().spacing.button_padding = egui::vec2(10.0, 8.0);
                             let visuals = &mut ui.style_mut().visuals;
                             visuals.extreme_bg_color = CONTROL_BG;
                             visuals.window_fill = CONTROL_BG;
@@ -480,7 +502,8 @@ impl eframe::App for SettingsApp {
 
                             egui::ComboBox::from_id_source("fullscreen_exception_window")
                                 .selected_text(selected_label)
-                                .width(210.0)
+                                .width((ui.available_width() - 64.0).max(80.0))
+                                .height(260.0)
                                 .icon(|ui, rect, visuals, is_open, _| {
                                     let center = rect.center();
                                     let direction = if is_open { -1.0 } else { 1.0 };
@@ -503,7 +526,10 @@ impl eframe::App for SettingsApp {
 
                         let can_add = self.selected_window_executable.is_some();
                         if ui
-                            .add_enabled(can_add, egui::Button::new("添加"))
+                            .add_enabled_ui(can_add, |ui| {
+                                accent_button(ui, "添加", egui::vec2(58.0, 52.0))
+                            })
+                            .inner
                             .clicked()
                         {
                             let executable = self
