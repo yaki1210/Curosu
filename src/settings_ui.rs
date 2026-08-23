@@ -484,6 +484,13 @@ impl eframe::App for SettingsApp {
                 );
                 ui.add_space(18.0);
 
+                // 例外列表会随着用户添加持续增长；主体必须在固定大小的设置窗口内
+                // 滚动，而不是让底部内容被裁掉。
+                egui::ScrollArea::vertical()
+                    .id_source("settings_content_scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
                 section(ui, "光标", |ui| {
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
@@ -671,6 +678,7 @@ impl eframe::App for SettingsApp {
                         s.fullscreen_overlay_exclusion_executables.remove(index);
                     }
                 });
+                    });
             });
 
         if s != before {
