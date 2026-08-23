@@ -591,12 +591,17 @@ impl Overlay {
         let pointer_hover = !info.hCursor.is_null() && info.hCursor == hand_handle;
         self.anim.pointer_hover = pointer_hover;
 
+        // 只有系统明确给出调整大小光标，且鼠标确实位于可缩放窗口的边框时，
+        // 才覆盖静止朝向。左键按下后立刻交还给原有按下/拖动旋转逻辑。
+        let resize_angle = self.resize_cursor_angle(info.hCursor, info.ptScreenPos.x, info.ptScreenPos.y);
+        self.anim.resize_angle = if self.anim.mouse_down { None } else { resize_angle };
+
         let resize_prompt_mode = {
             let g = self.settings.lock().unwrap_or_else(|e| e.into_inner());
             g.hover_sound_as_resize_prompt
         };
         if resize_prompt_mode {
-            let resize = self.is_resize_cursor(info.ptScreenPos.x, info.ptScreenPos.y);
+            let resize = resize_angle.is_some();
             if resize && !self.was_resize_prompt && !self.anim.mouse_down {
                 self.play_hover();
             }
@@ -627,32 +632,76 @@ impl Overlay {
         }
     }
 
-    fn is_resize_cursor(&self, px: i32, py: i32) -> bool {
+    /// 依据真实窗口边框返回指向窗口内部的箭头角度。基础图标指向右方：
+    /// 左边框为 0°、右边框为 180°、上/下边框分别为 90°/-90°。
+    fn resize_cursor_angle(
+        &self,
+        cursor_handle: *mut core::ffi::c_void,
+        px: i32,
+        py: i32,
+    ) -> Option<f64> {
+        let is_resize_handle = [
+            system_cursor::OCR_SIZEWE,
+            system_cursor::OCR_SIZENS,
+            system_cursor::OCR_SIZENWSE,
+            system_cursor::OCR_SIZENESW,
+        ]
+        .into_iter()
+        .any(|id| {
+            let handle = system_cursor::get_blank_handle(id);
+            !handle.is_null() && cursor_handle == handle
+        });
+        if !is_resize_handle {
+            return None;
+        }
+
         unsafe {
             let window = WindowFromPoint(windows_sys::Win32::Foundation::POINT { x: px, y: py });
             if window.is_null() {
-                return false;
+                return None;
             }
             let root = GetAncestor(window, GA_ROOT);
             if root.is_null() || root == self.hwnd {
-                return false;
+                return None;
             }
             let style = GetWindowLongPtrW(root, GWL_STYLE);
             let ws_maximize: isize = 0x01000000;
             let ws_thickframe: isize = 0x00040000;
             if (style & ws_maximize) != 0 || (style & ws_thickframe) == 0 {
-                return false;
+                return None;
             }
             let mut rect: windows_sys::Win32::Foundation::RECT = std::mem::zeroed();
             if GetWindowRect(root, &mut rect) == 0 {
-                return false;
+                return None;
             }
             let border_x = GetSystemMetrics(32).max(1);
             let border_y = GetSystemMetrics(33).max(1);
-            px <= rect.left + border_x
-                || px >= rect.right - border_x
-                || py <= rect.top + border_y
-                || py >= rect.bottom - border_y
+            let left = px <= rect.left + border_x;
+            let right = px >= rect.right - border_x;
+            let top = py <= rect.top + border_y;
+            let bottom = py >= rect.bottom - border_y;
+
+            // 旋转坐标系的正方向在屏幕坐标中为顺时针，因此四角分别指向
+            // 窗口内部的右下、左下、右上、左上。
+            if left && top {
+                Some(45.0)
+            } else if right && top {
+                Some(135.0)
+            } else if left && bottom {
+                Some(-45.0)
+            } else if right && bottom {
+                Some(-135.0)
+            } else if left {
+                Some(0.0)
+            } else if right {
+                Some(180.0)
+            } else if top {
+                Some(90.0)
+            } else if bottom {
+                Some(-90.0)
+            } else {
+                None
+            }
         }
     }
 
