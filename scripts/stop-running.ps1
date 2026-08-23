@@ -42,7 +42,19 @@ Start-Sleep -Milliseconds 1200
 $remaining = Get-Process curosu -ErrorAction SilentlyContinue
 if ($remaining)
 {
-    Write-Host "Some curosu processes are still running."
+    # 覆盖层通常没有可见顶级窗口，因而收不到上面的 WM_CLOSE。
+    # 安装前必须释放 exe 文件句柄；在已经等待过优雅退出后再强制终止。
+    Write-Host "Some curosu processes are still running; forcing termination."
+    $remaining | Stop-Process -Force -ErrorAction Stop
+    Start-Sleep -Milliseconds 500
+
+    $remaining = Get-Process curosu -ErrorAction SilentlyContinue
+    if ($remaining)
+    {
+        throw "Unable to stop all curosu processes."
+    }
+
+    Write-Host "curosu force-stopped."
 }
 else
 {
