@@ -703,7 +703,7 @@ impl Overlay {
 
     fn handle_tray(&mut self, lparam: u32) {
         if lparam == WM_RBUTTONUP as u32 || lparam == WM_CONTEXTMENU as u32 {
-            crate::tray::show_menu(self.hwnd);
+            crate::tray::show_menu(self.hwnd, self.cursor_enabled);
         } else if lparam == WM_LBUTTONUP as u32 {
             self.open_settings();
         }

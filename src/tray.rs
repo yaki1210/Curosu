@@ -64,14 +64,19 @@ pub fn remove(hwnd: HWND) {
 }
 
 /// 弹出右键菜单。菜单项通过 PostMessage 反馈给窗口。
-pub fn show_menu(hwnd: HWND) {
+pub fn show_menu(hwnd: HWND, cursor_enabled: bool) {
     unsafe {
         let menu = CreatePopupMenu();
         if menu.is_null() {
             return;
         }
         let s1: Vec<u16> = "设置\0".encode_utf16().collect();
-        let s2: Vec<u16> = "关闭光标\0".encode_utf16().collect();
+        let toggle_label = if cursor_enabled {
+            "关闭光标"
+        } else {
+            "打开光标"
+        };
+        let s2: Vec<u16> = format!("{toggle_label}\0").encode_utf16().collect();
         let s3: Vec<u16> = "退出\0".encode_utf16().collect();
         AppendMenuW(menu, MF_STRING, 1001, s1.as_ptr());
         AppendMenuW(menu, MF_STRING, 1002, s2.as_ptr());
