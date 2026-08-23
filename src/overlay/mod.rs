@@ -31,7 +31,7 @@ use windows_sys::Win32::UI::HiDpi::{
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, FindWindowW, GetAncestor, GetClassNameW,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetAncestor, GetClassNameW,
     GetCursorInfo, GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
     GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
     IsWindowVisible, KillTimer, LoadIconW, PostQuitMessage, RegisterClassW, SetTimer, SetWindowPos,
@@ -69,7 +69,6 @@ struct Overlay {
     suspended_for_secure_desktop: bool,
     suspended_for_fullscreen: bool,
     suspended_for_taskbar_preview: bool,
-    last_taskbar_hover_s: f64,
     last_input_desktop_check_s: f64,
     last_fullscreen_check_s: f64,
     force_topmost: bool,
@@ -242,7 +241,6 @@ pub fn run(settings: Arc<Mutex<Settings>>, tap: TapPlayer, hover: TapPlayer) {
             suspended_for_secure_desktop: false,
             suspended_for_fullscreen: false,
             suspended_for_taskbar_preview: false,
-            last_taskbar_hover_s: f64::NEG_INFINITY,
             last_input_desktop_check_s: f64::NEG_INFINITY,
             last_fullscreen_check_s: f64::NEG_INFINITY,
             force_topmost: true,
@@ -321,7 +319,7 @@ impl Overlay {
         if self.suspended_for_fullscreen {
             return;
         }
-        self.update_taskbar_preview_state(now);
+        self.update_taskbar_preview_state();
         if self.suspended_for_taskbar_preview {
             return;
         }
@@ -442,29 +440,14 @@ impl Overlay {
         }
     }
 
-    /// DWM 的任务栏缩略图不和普通桌面窗口共享可控的 Z 序，因此覆盖层会被
-    /// 它遮住。优先按鼠标下实际的预览窗口识别；DWM 没有暴露窗口时，才在
-    /// 刚离开任务栏后的窄边缘区域内使用几何兜底，避免原先 600px 的大范围误判。
-    fn update_taskbar_preview_state(&mut self, now: f64) {
-        let over_preview = unsafe {
-            let is_taskbar_or_preview =
-                is_cursor_over_taskbar_window() || is_cursor_over_taskbar_preview_window();
-            if is_taskbar_or_preview {
-                self.last_taskbar_hover_s = now;
-                true
-            } else {
-                const HOVER_GRACE_S: f64 = 0.75;
-                now - self.last_taskbar_hover_s <= HOVER_GRACE_S
-                    && is_near_taskbar_preview_fallback_zone()
-            }
-        };
+    /// 仅在鼠标实际命中 DWM 任务栏缩略图窗口时隐藏覆盖层。任务栏本体仍保留
+    /// 动画覆盖层；缩略图中则恢复用户自己的默认系统光标。
+    fn update_taskbar_preview_state(&mut self) {
+        let over_preview = unsafe { is_cursor_over_taskbar_preview_window() };
         if over_preview && !self.suspended_for_taskbar_preview {
-            log("taskbar thumbnail entered; switching to static fallback cursor");
+            log("taskbar thumbnail entered; restoring user's system cursor");
             self.suspended_for_taskbar_preview = true;
             system_cursor::restore();
-            if !system_cursor::install_static_fallback() {
-                log("taskbar fallback cursor installation failed; using the user's cursor scheme");
-            }
             unsafe { ShowWindow(self.hwnd, SW_HIDE) };
         } else if !over_preview && self.suspended_for_taskbar_preview {
             log("taskbar thumbnail left; restoring cursor overlay");
@@ -952,11 +935,6 @@ unsafe fn window_executable_name(hwnd: HWND) -> Option<String> {
         .map(|name| name.to_string_lossy().into_owned())
 }
 
-/// 鼠标位于主/副任务栏本体时，覆盖层无法可靠地出现在 Shell 预览层之上。
-unsafe fn is_cursor_over_taskbar_window() -> bool {
-    cursor_window_or_root_matches(is_taskbar_window_class)
-}
-
 /// `TaskListThumbnailWnd` 是传统与当前 Shell 都会使用的缩略图宿主类。
 /// 它存在时直接用真实窗口矩形命中，不再依赖猜测的预览高度。
 unsafe fn is_cursor_over_taskbar_preview_window() -> bool {
@@ -978,57 +956,6 @@ unsafe fn cursor_window_or_root_matches(matches: fn(&str) -> bool) -> bool {
         && window_class_name(root).as_deref().is_some_and(matches)
 }
 
-fn is_taskbar_window_class(class_name: &str) -> bool {
-    matches!(class_name, "Shell_TrayWnd" | "Shell_SecondaryTrayWnd")
-}
-
 fn is_taskbar_preview_window_class(class_name: &str) -> bool {
     class_name.starts_with("TaskListThumbnail") || class_name.starts_with("TaskListThumb")
-}
-
-/// DWM 偶尔不会让预览命中 `WindowFromPoint`。仅在鼠标刚从任务栏移出后，
-/// 使用 120px 的桌面侧边缘兜底，覆盖缩略图的入场路径但不吞掉 600px 区域。
-unsafe fn is_near_taskbar_preview_fallback_zone() -> bool {
-    is_near_taskbar_inner_edge("Shell_TrayWnd")
-        || is_near_taskbar_inner_edge("Shell_SecondaryTrayWnd")
-}
-
-unsafe fn is_near_taskbar_inner_edge(class_name: &str) -> bool {
-    let mut class_name: Vec<u16> = class_name.encode_utf16().collect();
-    class_name.push(0);
-    let hwnd = FindWindowW(class_name.as_ptr(), std::ptr::null());
-    if hwnd.is_null() || IsWindowVisible(hwnd) == 0 {
-        return false;
-    }
-
-    let mut rect: windows_sys::Win32::Foundation::RECT = std::mem::zeroed();
-    if GetWindowRect(hwnd, &mut rect) == 0 {
-        return false;
-    }
-    let (cx, cy) = hook::cursor_pos();
-    const PREVIEW_DEPTH: i32 = 120;
-    const EDGE_PADDING: i32 = 32;
-    let width = rect.right - rect.left;
-    let height = rect.bottom - rect.top;
-    if width >= height {
-        // 顶部/底部任务栏：缩略图出现在任务栏的桌面一侧。
-        let above = rect.top > 0;
-        cx >= rect.left - EDGE_PADDING
-            && cx < rect.right + EDGE_PADDING
-            && if above {
-                cy >= rect.top - PREVIEW_DEPTH && cy < rect.bottom + EDGE_PADDING
-            } else {
-                cy >= rect.top - EDGE_PADDING && cy < rect.bottom + PREVIEW_DEPTH
-            }
-    } else {
-        // 左侧/右侧任务栏：缩略图出现在任务栏的桌面一侧。
-        let left = rect.left > 0;
-        cy >= rect.top - EDGE_PADDING
-            && cy < rect.bottom + EDGE_PADDING
-            && if left {
-                cx >= rect.left - PREVIEW_DEPTH && cx < rect.right + EDGE_PADDING
-            } else {
-                cx >= rect.left - EDGE_PADDING && cx < rect.right + PREVIEW_DEPTH
-            }
-    }
 }
