@@ -31,8 +31,8 @@ const CONTROL_BORDER: egui::Color32 = egui::Color32::from_rgb(255, 116, 181);
 const SLIDER_TRACK: egui::Color32 = egui::Color32::from_rgb(29, 29, 36);
 const SLIDER_FILL: egui::Color32 = egui::Color32::from_rgb(205, 77, 162);
 const SLIDER_HIGHLIGHT: egui::Color32 = egui::Color32::from_rgb(255, 151, 212);
-/// 下拉列表滚动条的浅紫把手，参考 osu! 的宽圆角滚动条。
-const SCROLL_HANDLE: egui::Color32 = egui::Color32::from_rgb(220, 205, 232);
+/// 下拉列表滚动条的灰紫把手，贴近 osu! 的宽胶囊形滚动条。
+const SCROLL_HANDLE: egui::Color32 = egui::Color32::from_rgb(185, 179, 197);
 
 /// 加载中文字体（Microsoft YaHei）注入 egui。
 fn setup_fonts(ctx: &egui::Context) {
@@ -93,6 +93,16 @@ fn setup_style(ctx: &egui::Context) {
     visuals.window_stroke = egui::Stroke::new(2.0_f32, CONTROL_BORDER);
     visuals.window_rounding = egui::Rounding::same(8.0);
     visuals.menu_rounding = egui::Rounding::same(8.0);
+    // ScrollArea 在 foreground_color 模式下以各状态的 fg_stroke 绘制把手。
+    // 统一为圆角灰紫色，避免默认白色直角块与 osu! 列表风格冲突。
+    for widget in [
+        &mut visuals.widgets.inactive,
+        &mut visuals.widgets.hovered,
+        &mut visuals.widgets.active,
+    ] {
+        widget.fg_stroke.color = SCROLL_HANDLE;
+        widget.rounding = egui::Rounding::same(10.0);
+    }
     // 显示"起点→滑块"的填充段（用 selection.bg_fill=ACCENT 粉色），
     // 对齐原版 WPF 滑条"粉填充 + 灰轨道"外观。
     visuals.slider_trailing_fill = true;
