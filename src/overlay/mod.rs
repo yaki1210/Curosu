@@ -24,14 +24,14 @@ use windows_sys::Win32::UI::HiDpi::{
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, FindWindowW, GetAncestor,
-    GetCursorInfo, GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindow,
-    GetWindowLongPtrW, GetWindowRect, IsWindowVisible, KillTimer, LoadIconW, PostQuitMessage,
-    RegisterClassW, SetTimer, SetWindowPos, ShowWindow, TranslateMessage, WindowFromPoint,
-    CS_HREDRAW, CS_VREDRAW, CURSORINFO, GA_ROOT, GWL_STYLE, GW_HWNDNEXT, HWND_TOPMOST, MSG,
-    SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE, WM_APP, WM_CONTEXTMENU, WM_CREATE,
-    WM_DESTROY, WM_DPICHANGED, WM_LBUTTONUP, WM_PAINT, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, FindWindowW, GetAncestor, GetCursorInfo,
+    GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect,
+    IsWindowVisible, KillTimer, LoadIconW, PostQuitMessage, RegisterClassW, SetTimer, SetWindowPos,
+    ShowWindow, TranslateMessage, WindowFromPoint, CS_HREDRAW, CS_VREDRAW, CURSORINFO, GA_ROOT,
+    GWL_STYLE, HWND_TOPMOST, MSG, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE,
+    WM_APP, WM_CONTEXTMENU, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_LBUTTONUP, WM_PAINT,
+    WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 const CURSOR_PNG: &[u8] = include_bytes!("../../assets/cursor.png");
@@ -382,10 +382,10 @@ impl Overlay {
     }
 
     /// DWM 的任务栏缩略图不和普通桌面窗口共享可控的 Z 序，因此覆盖层会被
-    /// 它遮住。光标进入系统任务栏的第一帧即切换到系统原生静态 .cur，避免等待
-    /// DWM 缩略图创建或参与命中测试；离开任务栏/缩略图后恢复动画。
+    /// 它遮住。光标进入任务栏及其上方的预览区域即切换到系统原生静态 .cur；
+    /// 不能只检测任务栏本体，否则光标移入缩略图的下一帧又会恢复覆盖层。
     fn update_taskbar_preview_state(&mut self) {
-        let over_preview = unsafe { is_in_taskbar_preview_region() };
+        let over_preview = unsafe { is_in_taskbar_fallback_zone() };
         if over_preview && !self.suspended_for_taskbar_preview {
             log("taskbar thumbnail entered; switching to static fallback cursor");
             self.suspended_for_taskbar_preview = true;
@@ -758,26 +758,15 @@ fn rand_f() -> f64 {
     frac.abs()
 }
 
-/// 缩略图出现的初始阶段，DWM 可能不把它作为鼠标命中窗口返回，甚至不会暴露
-/// `TaskListThumbnailWnd`。任务栏本体是稳定的 Shell 窗口，所以在光标到达
-/// `Shell_TrayWnd` 时提前启用静态光标。
-unsafe fn is_in_taskbar_preview_region() -> bool {
-    if is_cursor_over_window_class("Shell_TrayWnd") {
-        return true;
-    }
-
-    let name: Vec<u16> = "TaskListThumbnailWnd\0".encode_utf16().collect();
-    let mut preview = FindWindowW(name.as_ptr(), std::ptr::null());
-    while !preview.is_null() {
-        if IsWindowVisible(preview) != 0 {
-            return true;
-        }
-        preview = GetWindow(preview, GW_HWNDNEXT);
-    }
-    false
+/// DWM 缩略图窗口不是稳定的可枚举 Win32 窗口。基于稳定的 Shell 任务栏矩形，
+/// 将向桌面一侧扩展 600px：它覆盖缩略图及其移动路径，同时允许光标远离任务栏
+/// 后立即恢复动画覆盖层。
+unsafe fn is_in_taskbar_fallback_zone() -> bool {
+    is_cursor_in_taskbar_zone("Shell_TrayWnd")
+        || is_cursor_in_taskbar_zone("Shell_SecondaryTrayWnd")
 }
 
-unsafe fn is_cursor_over_window_class(class_name: &str) -> bool {
+unsafe fn is_cursor_in_taskbar_zone(class_name: &str) -> bool {
     let mut class_name: Vec<u16> = class_name.encode_utf16().collect();
     class_name.push(0);
     let hwnd = FindWindowW(class_name.as_ptr(), std::ptr::null());
@@ -790,5 +779,29 @@ unsafe fn is_cursor_over_window_class(class_name: &str) -> bool {
         return false;
     }
     let (cx, cy) = hook::cursor_pos();
-    cx >= rect.left && cx < rect.right && cy >= rect.top && cy < rect.bottom
+    const PREVIEW_DEPTH: i32 = 600;
+    const EDGE_PADDING: i32 = 64;
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+    if width >= height {
+        // 顶部/底部任务栏：缩略图出现在任务栏的桌面一侧。
+        let above = rect.top > 0;
+        cx >= rect.left - EDGE_PADDING
+            && cx < rect.right + EDGE_PADDING
+            && if above {
+                cy >= rect.top - PREVIEW_DEPTH && cy < rect.bottom + EDGE_PADDING
+            } else {
+                cy >= rect.top - EDGE_PADDING && cy < rect.bottom + PREVIEW_DEPTH
+            }
+    } else {
+        // 左侧/右侧任务栏：缩略图出现在任务栏的桌面一侧。
+        let left = rect.left > 0;
+        cy >= rect.top - EDGE_PADDING
+            && cy < rect.bottom + EDGE_PADDING
+            && if left {
+                cx >= rect.left - PREVIEW_DEPTH && cx < rect.right + EDGE_PADDING
+            } else {
+                cx >= rect.left - EDGE_PADDING && cx < rect.right + PREVIEW_DEPTH
+            }
+    }
 }
