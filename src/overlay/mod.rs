@@ -15,6 +15,9 @@ use std::sync::{Arc, Mutex};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{MonitorFromPoint, HMONITOR, MONITOR_DEFAULTTONEAREST};
 use windows_sys::Win32::Media::{timeBeginPeriod, timeEndPeriod};
+use windows_sys::Win32::System::StationsAndDesktops::{
+    CloseDesktop, OpenInputDesktop, DESKTOP_READOBJECTS,
+};
 use windows_sys::Win32::UI::HiDpi::{
     GetDpiForMonitor, SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     MDT_EFFECTIVE_DPI,
@@ -42,6 +45,7 @@ pub const MSG_EXIT: u32 = WM_APP + 3;
 pub const MSG_SETTINGS_CHANGED: u32 = WM_APP + 4;
 
 const FRAME_MS: u32 = 8;
+const INPUT_DESKTOP_CHECK_INTERVAL_S: f64 = 0.25;
 
 struct Overlay {
     hwnd: HWND,
@@ -54,6 +58,8 @@ struct Overlay {
     hover: TapPlayer,
 
     cursor_enabled: bool,
+    suspended_for_secure_desktop: bool,
+    last_input_desktop_check_s: f64,
     force_topmost: bool,
     dpi_scale: f64,
     dpi_monitor: HMONITOR,
@@ -222,6 +228,8 @@ pub fn run(settings: Arc<Mutex<Settings>>, tap: TapPlayer, hover: TapPlayer) {
             tap,
             hover,
             cursor_enabled: true,
+            suspended_for_secure_desktop: false,
+            last_input_desktop_check_s: f64::NEG_INFINITY,
             force_topmost: true,
             dpi_scale: 1.0,
             dpi_monitor: std::ptr::null_mut(),
@@ -291,6 +299,10 @@ impl Overlay {
             return;
         }
         let now = now_seconds();
+        self.update_secure_desktop_state(now);
+        if self.suspended_for_secure_desktop {
+            return;
+        }
         let mut dt = now - self.last_frame_time;
         self.last_frame_time = now;
         if dt <= 0.0 || dt > 0.1 {
@@ -320,6 +332,44 @@ impl Overlay {
         let previous_anim = self.anim;
         self.anim.update(dt, dx as f64, dy as f64);
         self.render_frame(self.anim.visual_changed_from(&previous_anim), now);
+    }
+
+    /// UAC 默认切换到 Winlogon 安全桌面；普通进程不能访问该桌面，覆盖层也
+    /// 无法绘制。此时必须还原全局系统光标，否则安全桌面会没有可见鼠标。
+    fn update_secure_desktop_state(&mut self, now: f64) {
+        if now - self.last_input_desktop_check_s < INPUT_DESKTOP_CHECK_INTERVAL_S {
+            return;
+        }
+        self.last_input_desktop_check_s = now;
+
+        let input_desktop_available = unsafe {
+            let desktop = OpenInputDesktop(0, 0, DESKTOP_READOBJECTS);
+            if desktop.is_null() {
+                false
+            } else {
+                CloseDesktop(desktop);
+                true
+            }
+        };
+
+        if !input_desktop_available && !self.suspended_for_secure_desktop {
+            log("secure desktop entered; restoring system cursors");
+            self.suspended_for_secure_desktop = true;
+            system_cursor::restore();
+            unsafe { ShowWindow(self.hwnd, SW_HIDE) };
+        } else if input_desktop_available && self.suspended_for_secure_desktop {
+            log("secure desktop left; restoring cursor overlay");
+            self.suspended_for_secure_desktop = false;
+            if system_cursor::install() {
+                hook::init_position();
+                self.force_topmost = true;
+                self.frame_ready = false;
+                unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
+            } else {
+                // 如果恢复失败，保持普通系统光标，避免再次出现无鼠标的状态。
+                self.cursor_enabled = false;
+            }
+        }
     }
 
     /// 按光标所在显示器求有效 DPI，按 HMONITOR 缓存。
@@ -670,6 +720,7 @@ impl Overlay {
             self.frame_ready = false;
             unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
         } else {
+            self.suspended_for_secure_desktop = false;
             hook::uninstall();
             self.mouse_hook_active = false;
             system_cursor::restore();
