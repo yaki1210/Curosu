@@ -407,11 +407,19 @@ impl Overlay {
         }
         self.last_fullscreen_check_s = now;
 
-        let fullscreen_exclusions = {
+        let (fullscreen_exclusions, fullscreen_exclusion_executables) = {
             let settings = self.settings.lock().unwrap_or_else(|e| e.into_inner());
-            settings.fullscreen_overlay_exclusions.clone()
+            (
+                settings.fullscreen_overlay_exclusions.clone(),
+                settings.fullscreen_overlay_exclusion_executables.clone(),
+            )
         };
-        let fullscreen = unsafe { foreground_window_covers_monitor(&fullscreen_exclusions) };
+        let fullscreen = unsafe {
+            foreground_window_covers_monitor(
+                &fullscreen_exclusions,
+                &fullscreen_exclusion_executables,
+            )
+        };
         if fullscreen && !self.suspended_for_fullscreen {
             log("fullscreen foreground entered; restoring user's system cursor");
             self.suspended_for_fullscreen = true;
@@ -812,12 +820,19 @@ fn rand_f() -> f64 {
 
 /// 返回前台窗口是否需要全屏降级。浏览器全屏视频仍由 DWM/浏览器窗口承载，
 /// 因而保留动画覆盖层；其余覆盖显示器的程序（例如游戏）则恢复系统鼠标。
-unsafe fn foreground_window_covers_monitor(fullscreen_exclusions: &str) -> bool {
+unsafe fn foreground_window_covers_monitor(
+    fullscreen_exclusions: &str,
+    fullscreen_exclusion_executables: &[String],
+) -> bool {
     let hwnd = GetForegroundWindow();
     if hwnd.is_null()
         || IsWindowVisible(hwnd) == 0
         || is_browser_window(hwnd)
-        || matches_fullscreen_exclusion(hwnd, fullscreen_exclusions)
+        || matches_fullscreen_exclusion(
+            hwnd,
+            fullscreen_exclusions,
+            fullscreen_exclusion_executables,
+        )
     {
         return false;
     }
@@ -854,13 +869,24 @@ unsafe fn is_browser_window(hwnd: HWND) -> bool {
 
 /// 用户可在设置中按程序名、窗口类名或标题关键字排除全屏降级。空行与未知格式
 /// 被忽略，规则比较不区分 ASCII 大小写。
-unsafe fn matches_fullscreen_exclusion(hwnd: HWND, rules: &str) -> bool {
-    if rules.trim().is_empty() {
-        return false;
-    }
+unsafe fn matches_fullscreen_exclusion(
+    hwnd: HWND,
+    rules: &str,
+    executables: &[String],
+) -> bool {
     let class_name = window_class_name(hwnd).unwrap_or_default();
     let title = window_title(hwnd);
     let executable = window_executable_name(hwnd).unwrap_or_default();
+
+    if executables
+        .iter()
+        .any(|entry| executable.eq_ignore_ascii_case(entry.trim()))
+    {
+        return true;
+    }
+    if rules.trim().is_empty() {
+        return false;
+    }
 
     rules.lines().map(str::trim).filter(|rule| !rule.is_empty()).any(|rule| {
         if let Some(value) = rule.strip_prefix("exe:") {

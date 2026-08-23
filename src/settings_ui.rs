@@ -7,9 +7,14 @@ use crate::settings::Settings;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM};
+use windows_sys::Win32::System::Threading::{
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, PostMessageW, SetForegroundWindow, ShowWindow, SW_HIDE, SW_SHOW,
+    EnumWindows, FindWindowW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+    PostMessageW, SetForegroundWindow, ShowWindow, SW_HIDE, SW_SHOW,
 };
 
 const APP_ICON_ICO: &[u8] = include_bytes!("../assets/icon.ico");
@@ -205,9 +210,30 @@ struct SettingsApp {
     hwnd: HWND,
     rx: Receiver<UiCmd>,
     settings_hwnd_found: bool,
+    selectable_windows: Vec<WindowChoice>,
+    selected_window_executable: Option<String>,
+}
+
+#[derive(Clone)]
+struct WindowChoice {
+    executable: String,
+    label: String,
 }
 
 impl SettingsApp {
+    fn refresh_selectable_windows(&mut self) {
+        self.selectable_windows = enumerate_visible_windows();
+        if let Some(selected) = &self.selected_window_executable {
+            if !self
+                .selectable_windows
+                .iter()
+                .any(|window| &window.executable == selected)
+            {
+                self.selected_window_executable = None;
+            }
+        }
+    }
+
     /// 记录设置窗口自己的 HWND，供 overlay 原生显示/隐藏。
     fn find_own_hwnd(&mut self) {
         if self.settings_hwnd_found {
@@ -266,6 +292,9 @@ impl SettingsApp {
 impl eframe::App for SettingsApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_commands(ctx);
+        if self.selectable_windows.is_empty() {
+            self.refresh_selectable_windows();
+        }
 
         let mut s = {
             let g = self.settings.lock().unwrap_or_else(|e| e.into_inner());
@@ -335,17 +364,74 @@ impl eframe::App for SettingsApp {
 
                 section(ui, "全屏例外", |ui| {
                     ui.label(
-                        egui::RichText::new("这些全屏窗口仍显示动画光标（每行一条规则）")
+                        egui::RichText::new("选择后添加：该程序全屏时仍显示动画光标")
                             .size(12.0)
                             .color(MUTED),
                     );
-                    ui.add(
-                        egui::TextEdit::multiline(&mut s.fullscreen_overlay_exclusions)
-                            .desired_rows(4)
-                            .hint_text(
-                                "exe:waterfox.exe\nclass:MyBrowserWindow\ntitle:视频播放器",
-                            ),
-                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("刷新窗口列表").clicked() {
+                            self.refresh_selectable_windows();
+                        }
+
+                        let selected_label = self
+                            .selected_window_executable
+                            .as_ref()
+                            .and_then(|selected| {
+                                self.selectable_windows
+                                    .iter()
+                                    .find(|window| &window.executable == selected)
+                            })
+                            .map(|window| window.label.as_str())
+                            .unwrap_or("选择窗口…");
+                        egui::ComboBox::from_id_source("fullscreen_exception_window")
+                            .selected_text(selected_label)
+                            .width(210.0)
+                            .show_ui(ui, |ui| {
+                                for window in &self.selectable_windows {
+                                    ui.selectable_value(
+                                        &mut self.selected_window_executable,
+                                        Some(window.executable.clone()),
+                                        &window.label,
+                                    );
+                                }
+                            });
+
+                        let can_add = self.selected_window_executable.is_some();
+                        if ui
+                            .add_enabled(can_add, egui::Button::new("添加"))
+                            .clicked()
+                        {
+                            let executable = self
+                                .selected_window_executable
+                                .as_ref()
+                                .expect("button is enabled only with a selection");
+                            if !s
+                                .fullscreen_overlay_exclusion_executables
+                                .iter()
+                                .any(|item| item.eq_ignore_ascii_case(executable))
+                            {
+                                s.fullscreen_overlay_exclusion_executables
+                                    .push(executable.clone());
+                            }
+                        }
+                    });
+
+                    let mut remove_index = None;
+                    for (index, executable) in s
+                        .fullscreen_overlay_exclusion_executables
+                        .iter()
+                        .enumerate()
+                    {
+                        ui.horizontal(|ui| {
+                            ui.label(executable);
+                            if ui.small_button("移除").clicked() {
+                                remove_index = Some(index);
+                            }
+                        });
+                    }
+                    if let Some(index) = remove_index {
+                        s.fullscreen_overlay_exclusion_executables.remove(index);
+                    }
                 });
             });
 
@@ -360,6 +446,77 @@ impl eframe::App for SettingsApp {
             }
         }
     }
+}
+
+fn enumerate_visible_windows() -> Vec<WindowChoice> {
+    let mut windows: Vec<WindowChoice> = Vec::new();
+    unsafe {
+        EnumWindows(
+            Some(collect_visible_window),
+            &mut windows as *mut Vec<WindowChoice> as LPARAM,
+        );
+    }
+    windows.sort_by(|left, right| left.label.cmp(&right.label));
+    windows
+}
+
+unsafe extern "system" fn collect_visible_window(hwnd: HWND, lparam: LPARAM) -> i32 {
+    if IsWindowVisible(hwnd) == 0 {
+        return 1;
+    }
+    let mut title = [0u16; 256];
+    let title_len = GetWindowTextW(hwnd, title.as_mut_ptr(), title.len() as i32);
+    if title_len <= 0 {
+        return 1;
+    }
+    let Some(executable) = window_executable_name(hwnd) else {
+        return 1;
+    };
+    if executable.eq_ignore_ascii_case("curosu.exe") {
+        return 1;
+    }
+
+    let windows = &mut *(lparam as *mut Vec<WindowChoice>);
+    if windows
+        .iter()
+        .any(|window| window.executable.eq_ignore_ascii_case(&executable))
+    {
+        return 1;
+    }
+    let title = String::from_utf16_lossy(&title[..title_len as usize]);
+    windows.push(WindowChoice {
+        label: format!("{executable} — {title}"),
+        executable,
+    });
+    1
+}
+
+unsafe fn window_executable_name(hwnd: HWND) -> Option<String> {
+    let mut process_id = 0;
+    GetWindowThreadProcessId(hwnd, &mut process_id);
+    if process_id == 0 {
+        return None;
+    }
+    let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id);
+    if process.is_null() {
+        return None;
+    }
+
+    let mut path = [0u16; 1024];
+    let mut path_len = path.len() as u32;
+    let queried = QueryFullProcessImageNameW(
+        process,
+        PROCESS_NAME_WIN32,
+        path.as_mut_ptr(),
+        &mut path_len,
+    );
+    CloseHandle(process);
+    if queried == 0 || path_len == 0 {
+        return None;
+    }
+    std::path::Path::new(&String::from_utf16_lossy(&path[..path_len as usize]))
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
 }
 
 /// 常驻设置线程的命令发送端与启动标记。
@@ -440,6 +597,8 @@ fn settings_thread(rx: Receiver<UiCmd>, settings: Arc<Mutex<Settings>>, hwnd_usi
                 hwnd: hwnd_usize as HWND,
                 rx,
                 settings_hwnd_found: false,
+                selectable_windows: enumerate_visible_windows(),
+                selected_window_executable: None,
             }) as Box<dyn eframe::App>)
         };
         match eframe::run_native("Curosu", native_options, Box::new(app_creator)) {

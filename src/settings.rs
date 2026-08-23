@@ -19,6 +19,9 @@ pub struct Settings {
     /// 全屏时仍保留动画覆盖层的窗口规则，每行一条。
     #[serde(default)]
     pub fullscreen_overlay_exclusions: String,
+    /// 用户从设置窗口选择的程序名；全屏时保留动画覆盖层。
+    #[serde(default)]
+    pub fullscreen_overlay_exclusion_executables: Vec<String>,
 }
 
 impl Default for Settings {
@@ -32,6 +35,7 @@ impl Default for Settings {
             hover_sound_volume: 1.0,
             hover_sound_as_resize_prompt: false,
             fullscreen_overlay_exclusions: String::new(),
+            fullscreen_overlay_exclusion_executables: Vec::new(),
         }
     }
 }
@@ -103,5 +107,6 @@ mod tests {
         .expect("legacy settings should deserialize");
 
         assert!(settings.fullscreen_overlay_exclusions.is_empty());
+        assert!(settings.fullscreen_overlay_exclusion_executables.is_empty());
     }
 }
