@@ -821,12 +821,25 @@ impl eframe::App for SettingsApp {
                                     ui.painter().line_segment([middle, right], stroke);
                                 })
                                 .show_ui(ui, |ui| {
+                                    // ComboBox 内部默认强制选项文本横向扩展；长窗口标题
+                                    // 会把弹出层撑出视口，导致左右描边被裁掉。恢复截断并把
+                                    // 每一项限制在触发框宽度内，使弹出层四边完整可见。
+                                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                                    let item_width = ui.available_width();
+                                    ui.set_max_width(item_width);
                                     for window in &self.selectable_windows {
-                                        ui.selectable_value(
-                                            &mut self.selected_window_executable,
-                                            Some(window.executable.clone()),
-                                            &window.label,
+                                        let selected = self
+                                            .selected_window_executable
+                                            .as_ref()
+                                            .is_some_and(|value| value == &window.executable);
+                                        let response = ui.add_sized(
+                                            egui::vec2(item_width, ui.spacing().interact_size.y),
+                                            egui::SelectableLabel::new(selected, &window.label),
                                         );
+                                        if response.clicked() {
+                                            self.selected_window_executable =
+                                                Some(window.executable.clone());
+                                        }
                                     }
                                 });
                             }),
