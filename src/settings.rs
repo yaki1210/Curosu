@@ -6,10 +6,19 @@ use std::path::PathBuf;
 
 pub const MIN_CURSOR_WIDTH: f64 = 16.0;
 pub const MAX_CURSOR_WIDTH: f64 = 64.0;
+pub const MIN_CURSOR_OPACITY: f64 = 0.4;
+pub const MAX_CURSOR_OPACITY: f64 = 1.0;
+
+const fn default_cursor_opacity() -> f64 {
+    1.0
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
     pub cursor_width: f64,
+    /// 动画覆盖层的全局不透明度；不影响安全桌面或原生系统鼠标。
+    #[serde(default = "default_cursor_opacity")]
+    pub cursor_opacity: f64,
     pub auto_start: bool,
     pub tap_sound_enabled: bool,
     pub tap_sound_volume: f64,
@@ -28,6 +37,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             cursor_width: 30.0,
+            cursor_opacity: default_cursor_opacity(),
             auto_start: false,
             tap_sound_enabled: true,
             tap_sound_volume: 1.0,
@@ -70,6 +80,9 @@ impl Settings {
         match contents.and_then(|s| serde_json::from_str::<Settings>(&s).ok()) {
             Some(mut s) => {
                 s.cursor_width = s.cursor_width.clamp(MIN_CURSOR_WIDTH, MAX_CURSOR_WIDTH);
+                s.cursor_opacity = s
+                    .cursor_opacity
+                    .clamp(MIN_CURSOR_OPACITY, MAX_CURSOR_OPACITY);
                 s
             }
             None => Settings::default(),
@@ -108,5 +121,6 @@ mod tests {
 
         assert!(settings.fullscreen_overlay_exclusions.is_empty());
         assert!(settings.fullscreen_overlay_exclusion_executables.is_empty());
+        assert_eq!(settings.cursor_opacity, 1.0);
     }
 }

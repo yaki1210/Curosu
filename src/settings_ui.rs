@@ -37,6 +37,8 @@ const CONTROL_BORDER: egui::Color32 = egui::Color32::from_rgb(255, 116, 181);
 const SLIDER_TRACK: egui::Color32 = egui::Color32::from_rgb(29, 29, 36);
 const SLIDER_FILL: egui::Color32 = egui::Color32::from_rgb(205, 77, 162);
 const SLIDER_HIGHLIGHT: egui::Color32 = egui::Color32::from_rgb(255, 151, 212);
+/// 光标与音量滑条左侧的固定数值列，保证所有滑条起点对齐。
+const SLIDER_VALUE_COLUMN_WIDTH: f32 = 75.0;
 /// 下拉列表滚动条的灰紫把手，贴近 osu! 的宽胶囊形滚动条。
 const SCROLL_HANDLE: egui::Color32 = egui::Color32::from_rgb(185, 179, 197);
 
@@ -286,9 +288,20 @@ fn draw_slider(ui: &mut egui::Ui, value: &mut f64, range: std::ops::RangeInclusi
     }
 }
 
+/// `allocate_ui_with_layout` 会按内容收缩，不能保证横向布局预留固定宽度。
+/// 此处先占用精确矩形，再在其中绘制数值，确保后续滑条严格对齐。
+fn slider_value_column(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(SLIDER_VALUE_COLUMN_WIDTH, 52.0),
+        egui::Sense::hover(),
+    );
+    let mut column = ui.child_ui(rect, egui::Layout::top_down(egui::Align::Min), None);
+    contents(&mut column);
+}
+
 fn draw_volume(ui: &mut egui::Ui, label: &str, value: &mut f64) {
     ui.horizontal(|ui| {
-        ui.vertical(|ui| {
+        slider_value_column(ui, |ui| {
             ui.label(egui::RichText::new(label).size(13.0).color(MUTED));
             ui.label(
                 egui::RichText::new(format!("{}%", (*value * 100.0).round() as i32))
@@ -657,7 +670,7 @@ impl eframe::App for SettingsApp {
                         ui.set_min_width(ui.available_width());
                 section(ui, "光标", |ui| {
                     ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
+                        slider_value_column(ui, |ui| {
                             ui.label(egui::RichText::new("光标大小").size(13.0).color(MUTED));
                             ui.label(
                                 egui::RichText::new(format!("{:.0} px", s.cursor_width))
@@ -676,6 +689,23 @@ impl eframe::App for SettingsApp {
                         if reset_icon_button(ui).clicked() {
                             s.cursor_width = 30.0;
                         }
+                    });
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        slider_value_column(ui, |ui| {
+                            ui.label(egui::RichText::new("光标透明度").size(13.0).color(MUTED));
+                            ui.label(
+                                egui::RichText::new(format!("{:.0}%", s.cursor_opacity * 100.0))
+                                    .size(18.0)
+                                    .color(TEXT),
+                            );
+                        });
+                        ui.add_space(14.0);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(ui.available_width(), 52.0),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| draw_slider(ui, &mut s.cursor_opacity, 0.4..=1.0),
+                        );
                     });
                 });
                 ui.add_space(12.0);
