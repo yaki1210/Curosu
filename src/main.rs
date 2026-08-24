@@ -36,6 +36,13 @@ fn main() {
 
     let settings = Arc::new(Mutex::new(Settings::load()));
 
+    // 启动时同步一次 Run 键：既确保当前设置生效，也迁移旧版本写入的未加引号路径。
+    let auto_start = {
+        let s = settings.lock().unwrap_or_else(|e| e.into_inner());
+        s.auto_start
+    };
+    autostart::apply(auto_start);
+
     // 音效播放器
     let tap = TapPlayer::new(include_bytes!("../assets/cursor-tap.wav").to_vec());
     let hover = TapPlayer::new(include_bytes!("../assets/default-hover.wav").to_vec());
