@@ -882,6 +882,7 @@ unsafe fn foreground_window_covers_monitor(
     if hwnd.is_null()
         || IsWindowVisible(hwnd) == 0
         || is_desktop_shell_window(hwnd)
+        || is_windows_screen_capture_overlay(hwnd)
         || is_browser_window(hwnd)
         || matches_fullscreen_exclusion(
             hwnd,
@@ -919,6 +920,15 @@ unsafe fn is_desktop_shell_window(hwnd: HWND) -> bool {
     matches!(
         window_class_name(hwnd).as_deref(),
         Some("Progman") | Some("WorkerW")
+    )
+}
+
+/// Win+Shift+S 的全屏选区由系统截图宿主显示。它不是游戏全屏，因此保持
+/// Curosu 的动画覆盖层，而不是回退到系统鼠标。
+unsafe fn is_windows_screen_capture_overlay(hwnd: HWND) -> bool {
+    matches!(
+        window_executable_name(hwnd).as_deref(),
+        Some("ScreenClippingHost.exe") | Some("SnippingTool.exe")
     )
 }
 
