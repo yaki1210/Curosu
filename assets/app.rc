@@ -1,4 +1,4 @@
-// 资源脚本：嵌入图标和应用清单（requireAdministrator + uiAccess=true + PerMonitorV2）
+// 资源脚本：嵌入图标和应用清单（asInvoker + uiAccess=true + PerMonitorV2）
 // llvm-rc 需要显式 #define 才能把 RT_MANIFEST 解析为整数类型 24，
 // 否则 manifest 会被存成非标准资源类型，Windows 加载器读不到。
 #define RT_MANIFEST 24
