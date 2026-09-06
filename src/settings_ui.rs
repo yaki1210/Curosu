@@ -41,6 +41,10 @@ const SLIDER_HIGHLIGHT: egui::Color32 = egui::Color32::from_rgb(255, 151, 212);
 const SLIDER_VALUE_COLUMN_WIDTH: f32 = 75.0;
 /// 下拉列表滚动条的灰紫把手，贴近 osu! 的宽胶囊形滚动条。
 const SCROLL_HANDLE: egui::Color32 = egui::Color32::from_rgb(185, 179, 197);
+/// 标题栏按钮/图标距窗口顶的视觉边距（并入按钮/拖拽交互区）。
+const TITLEBAR_TOP_PAD: f32 = 12.0;
+/// 标题栏整条交互高度（含顶部边距；下方 40px 为视觉按钮区）。
+const TITLEBAR_H: f32 = TITLEBAR_TOP_PAD + 40.0;
 
 /// 使用内嵌 Torus 作为拉丁文字体，并以系统微软雅黑补齐中文字符。
 fn setup_fonts(ctx: &egui::Context) {
@@ -95,10 +99,10 @@ fn setup_style(ctx: &egui::Context) {
     // 因此把滚动条规格放在全局样式，保证窗口列表也使用 osu! 风格的宽圆角把手。
     let scroll = &mut style.spacing.scroll;
     scroll.floating = false;
-    scroll.bar_width = 18.0;
+    scroll.bar_width = 20.0;
     scroll.handle_min_length = 44.0;
     scroll.bar_inner_margin = 4.0;
-    scroll.bar_outer_margin = 2.0;
+    scroll.bar_outer_margin = 0.0;
     scroll.foreground_color = true;
 
     let mut visuals = egui::Visuals::dark();
@@ -336,15 +340,16 @@ fn reset_icon_button(ui: &mut egui::Ui) -> egui::Response {
 
     // 不依赖字体的回转箭头，避免 Microsoft YaHei 缺少 ↶ 字形而显示方块。
     // 两段贝塞尔曲线保持圆弧平滑，避免折线在小尺寸下看起来像损坏的图标。
+    // 所有 x 坐标关于按钮中心水平镜像，箭头指向左上（左右翻转后的恢复默认）。
     let center = rect.center();
     let stroke = egui::Stroke::new(2.2_f32, ACCENT);
     ui.painter().add(egui::Shape::CubicBezier(
         egui::epaint::CubicBezierShape::from_points_stroke(
             [
-                egui::pos2(center.x + 8.0, center.y + 3.0),
-                egui::pos2(center.x + 8.0, center.y + 8.0),
-                egui::pos2(center.x - 8.0, center.y + 9.0),
-                egui::pos2(center.x - 8.0, center.y),
+                egui::pos2(center.x - 8.0, center.y + 3.0),
+                egui::pos2(center.x - 8.0, center.y + 8.0),
+                egui::pos2(center.x + 8.0, center.y + 9.0),
+                egui::pos2(center.x + 8.0, center.y),
             ],
             false,
             egui::Color32::TRANSPARENT,
@@ -354,10 +359,10 @@ fn reset_icon_button(ui: &mut egui::Ui) -> egui::Response {
     ui.painter().add(egui::Shape::CubicBezier(
         egui::epaint::CubicBezierShape::from_points_stroke(
             [
-                egui::pos2(center.x - 8.0, center.y),
-                egui::pos2(center.x - 8.0, center.y - 8.0),
-                egui::pos2(center.x + 1.0, center.y - 10.0),
-                egui::pos2(center.x + 6.0, center.y - 6.0),
+                egui::pos2(center.x + 8.0, center.y),
+                egui::pos2(center.x + 8.0, center.y - 8.0),
+                egui::pos2(center.x - 1.0, center.y - 10.0),
+                egui::pos2(center.x - 6.0, center.y - 6.0),
             ],
             false,
             egui::Color32::TRANSPARENT,
@@ -367,9 +372,9 @@ fn reset_icon_button(ui: &mut egui::Ui) -> egui::Response {
     // 实心、加大的箭头让 36px 按钮内的图标一眼能辨认为“恢复默认”。
     ui.painter().add(egui::Shape::convex_polygon(
         vec![
-            egui::pos2(center.x + 9.5, center.y - 7.0),
-            egui::pos2(center.x + 2.0, center.y - 11.0),
-            egui::pos2(center.x + 2.0, center.y - 3.0),
+            egui::pos2(center.x - 9.5, center.y - 7.0),
+            egui::pos2(center.x - 2.0, center.y - 11.0),
+            egui::pos2(center.x - 2.0, center.y - 3.0),
         ],
         ACCENT,
         egui::Stroke::NONE,
@@ -380,7 +385,12 @@ fn reset_icon_button(ui: &mut egui::Ui) -> egui::Response {
 /// 自绘标题栏按钮（最小化/关闭）。图标用 painter 线段绘制，不依赖字体字形。
 /// 悬停底色：最小化 CONTROL_HOVER，关闭 SLIDER_FILL（滑条填充粉红）。
 fn titlebar_button(ui: &mut egui::Ui, close: bool) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(44.0, 40.0), egui::Sense::click());
+    // 尺寸覆盖整条标题栏（含顶部 16px 视觉边距）：交互与 hover 填充
+    // 由窗口顶 (y=0) 到按钮底整块生效；图标画在顶部边距下方的按钮区中心。
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(44.0, TITLEBAR_H),
+        egui::Sense::click(),
+    );
     let hovered = response.hovered();
     if hovered {
         let bg = if close { SLIDER_FILL } else { CONTROL_HOVER };
@@ -389,7 +399,8 @@ fn titlebar_button(ui: &mut egui::Ui, close: bool) -> egui::Response {
     }
 
     let stroke = egui::Stroke::new(2.0_f32, if hovered { TEXT } else { MUTED });
-    let center = rect.center();
+    // 图标垂直中心 = 顶部视觉边距 + 40px 按钮区中心（与"设置"文字对齐）。
+    let center = egui::pos2(rect.center().x, rect.top() + TITLEBAR_TOP_PAD + 20.0);
     if close {
         // ×：两条对角线
         let r = 6.0;
@@ -617,21 +628,25 @@ impl eframe::App for SettingsApp {
         let before = s.clone();
 
         // 单个 CentralPanel：标题栏作为面板内首行，与内容区共用同一 fill，
-        // 物理上只有一个填充矩形，杜绝面板接缝。按钮悬停填充从窗口最顶部
-        // (y=0) 开始。左侧标题区按住可拖动窗口，右侧为最小化/关闭按钮。
+        // 物理上只有一个填充矩形，杜绝面板接缝。左侧标题区按住可拖动窗口，
+        // 右侧为最小化/关闭按钮（右缘贴窗口右沿用惯例）。
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(BACKGROUND))
             .show(ctx, |ui| {
+                // 标题栏：整条（含上方 TITLEBAR_TOP_PAD 视觉边距）为拖拽/按钮交互区，
+                // hover 填充覆盖到窗口顶；"设置"文字与图标在顶边距下方居中。
                 ui.horizontal(|ui| {
-                    // 按钮间零间距，两个 44px 按钮无缝紧贴右上角。
+                    // 按钮间零间距，两个按钮无缝紧贴右上角。
                     ui.style_mut().spacing.item_spacing.x = 0.0;
                     let drag_width = (ui.available_width() - 88.0).max(60.0);
                     let (rect, response) = ui.allocate_exact_size(
-                        egui::vec2(drag_width, 40.0),
+                        egui::vec2(drag_width, TITLEBAR_H),
                         egui::Sense::click_and_drag(),
                     );
+                    // 恢复标题文字（与按钮图标同一水平线 = 顶边距下方的按钮区中心）。
+                    let inner_center_y = rect.top() + TITLEBAR_TOP_PAD + 20.0;
                     ui.painter().text(
-                        egui::pos2(rect.left() + 20.0, rect.center().y),
+                        egui::pos2(rect.left() + 20.0, inner_center_y),
                         egui::Align2::LEFT_CENTER,
                         "设置",
                         egui::FontId::proportional(24.0),
@@ -652,12 +667,16 @@ impl eframe::App for SettingsApp {
                     }
                 });
 
+                // 抵消行后默认 item_spacing.y(8px)，标题行底直接衔接内容区。
+                ui.add_space(-ui.spacing().item_spacing.y);
+
                 // 内容区：内边距由内层透明 Frame 提供，与标题栏共用 BACKGROUND。
+                // 左侧 10px、右侧 20px；顶部 8px 使标题行与内容面板之间紧凑而不拥挤。
                 egui::Frame::none()
                     .inner_margin(egui::Margin {
-                        left: 20.0,
+                        left: 10.0,
                         right: 20.0,
-                        top: 18.0,
+                        top: 8.0,
                         bottom: 20.0,
                     })
                     .show(ui, |ui| {

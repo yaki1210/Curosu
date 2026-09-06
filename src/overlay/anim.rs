@@ -253,9 +253,12 @@ impl CursorAnim {
     /// 更新一帧（dt 秒）。
     pub fn update(&mut self, dt: f64, drag_dx: f64, drag_dy: f64) {
         let (target_scale, target_additive, new_angle) = if self.mouse_down {
-            // 按下：缩小 + 发光；拖动时按拖动方向旋转
+            // 按下：缩小 + 发光；拖动时按拖动方向旋转。
+            // 在可交互元素（悬停）上按下时保持竖直角度，不再回落默认倾斜。
             let target_angle = if self.drag_active {
                 self.update_drag_target(drag_dx, drag_dy)
+            } else if self.pointer_hover {
+                POINTER_ANGLE
             } else {
                 0.0
             };
@@ -272,6 +275,7 @@ impl CursorAnim {
             (1.0, 0.0, self.angle)
         } else {
             // 边框方向优先于普通链接悬停；没有边框方向时保留原版手型角度。
+            // 悬停只改为竖直朝向、不发光（默认颜色），粉色仅在按下时出现。
             let target_angle = self.resize_angle.unwrap_or_else(|| {
                 if self.pointer_hover {
                     POINTER_ANGLE
@@ -282,7 +286,7 @@ impl CursorAnim {
             let delta = normalize_angle(target_angle - self.angle);
             self.angle_velocity += (240.0 * delta - 20.0 * self.angle_velocity) * dt;
             let a = self.angle + self.angle_velocity * dt;
-            (1.0, if self.pointer_hover { 1.0 } else { 0.0 }, a)
+            (1.0, 0.0, a)
         };
         self.angle = new_angle;
 
@@ -299,6 +303,8 @@ impl CursorAnim {
         let target_angle = if self.mouse_down {
             if self.drag_active {
                 self.drag_target_angle
+            } else if self.pointer_hover {
+                POINTER_ANGLE
             } else {
                 0.0
             }
@@ -348,14 +354,15 @@ mod tests {
     }
 
     #[test]
-    fn hand_hover_uses_stable_pink_state() {
+    fn hand_hover_keeps_vertical_angle_without_glow() {
         let mut anim = CursorAnim::default();
         anim.pointer_hover = true;
         for _ in 0..120 {
             anim.update(1.0 / 60.0, 0.0, 0.0);
         }
+        // 悬停：保持竖直角度、不加粉光（默认颜色）
         assert_eq!(anim.angle, super::POINTER_ANGLE);
-        assert_eq!(anim.additive_opacity, 1.0);
+        assert_eq!(anim.additive_opacity, 0.0);
 
         let settled = anim;
         anim.update(1.0 / 60.0, 0.0, 0.0);
