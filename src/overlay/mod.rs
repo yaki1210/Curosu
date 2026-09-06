@@ -594,9 +594,10 @@ impl Overlay {
         self.anim.pointer_hover = pointer_hover;
 
         // 只有系统明确给出调整大小光标，且鼠标确实位于可缩放窗口的边框时，
-        // 才覆盖静止朝向。左键按下后立刻交还给原有按下/拖动旋转逻辑。
+        // 才覆盖静止朝向。按下期间也持续更新：角度逻辑按下/未按下共用，
+        // 按下只叠加粉色与缩放，不改变该朝向；开始拖动后由拖动方向接管。
         let resize_angle = self.resize_cursor_angle(info.hCursor, info.ptScreenPos.x, info.ptScreenPos.y);
-        self.anim.resize_angle = if self.anim.mouse_down { None } else { resize_angle };
+        self.anim.resize_angle = resize_angle;
 
         let resize_prompt_mode = {
             let g = self.settings.lock().unwrap_or_else(|e| e.into_inner());

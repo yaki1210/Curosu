@@ -138,7 +138,7 @@ impl CursorAnim {
     pub fn begin_press(&mut self) {
         self.spin_returning = false;
         self.elastic_returning = false;
-        self.resize_angle = None;
+        // resize_angle 在按下期间保持（角度逻辑按下/未按下共用，仅叠粉与缩放）。
         self.mouse_down = true;
         self.drag_active = false;
         self.drag_target_angle = self.angle;
@@ -253,20 +253,29 @@ impl CursorAnim {
     /// 更新一帧（dt 秒）。
     pub fn update(&mut self, dt: f64, drag_dx: f64, drag_dy: f64) {
         let (target_scale, target_additive, new_angle) = if self.mouse_down {
-            // 按下：缩小 + 发光；拖动时按拖动方向旋转。
-            // 在可交互元素（悬停）上按下时保持竖直角度，不再回落默认倾斜。
-            let target_angle = if self.drag_active {
-                self.update_drag_target(drag_dx, drag_dy)
-            } else if self.pointer_hover {
-                POINTER_ANGLE
+            if self.drag_active {
+                // 拖动：按拖动方向连续旋转。
+                // target_angle 已经是连续展开角度，这里不能再次归一化，
+                // 否则累计超过一圈后会重新折回 [-180°, 180°]。
+                let target = self.update_drag_target(drag_dx, drag_dy);
+                let delta = target - self.angle;
+                let a = self.angle + delta * (dt * DRAG_FOLLOW_RATE).clamp(0.0, 1.0);
+                (0.9, 1.0, a)
             } else {
-                0.0
-            };
-            // target_angle 已经是连续展开角度，这里不能再次归一化，
-            // 否则累计超过一圈后会重新折回 [-180°, 180°]。
-            let delta = target_angle - self.angle;
-            let a = self.angle + delta * (dt * DRAG_FOLLOW_RATE).clamp(0.0, 1.0);
-            (0.9, 1.0, a)
+                // 按下未拖动：角度不因按下而改变——仍由独立逻辑
+                // （边框方向 > 悬停竖直 > 默认 0°）收敛，仅叠加粉色与缩放。
+                let target_angle = self.resize_angle.unwrap_or_else(|| {
+                    if self.pointer_hover {
+                        POINTER_ANGLE
+                    } else {
+                        0.0
+                    }
+                });
+                let delta = normalize_angle(target_angle - self.angle);
+                self.angle_velocity += (240.0 * delta - 20.0 * self.angle_velocity) * dt;
+                let a = self.angle + self.angle_velocity * dt;
+                (0.9, 1.0, a)
+            }
         } else if self.spin_returning {
             self.update_spin(dt);
             (1.0, 0.0, self.angle)
@@ -303,10 +312,15 @@ impl CursorAnim {
         let target_angle = if self.mouse_down {
             if self.drag_active {
                 self.drag_target_angle
-            } else if self.pointer_hover {
-                POINTER_ANGLE
             } else {
-                0.0
+                // 按下未拖动：与非按下一致（边框 > 悬停 > 默认 0°）
+                self.resize_angle.unwrap_or_else(|| {
+                    if self.pointer_hover {
+                        POINTER_ANGLE
+                    } else {
+                        0.0
+                    }
+                })
             }
         } else if !self.elastic_returning && !self.spin_returning {
             self.resize_angle.unwrap_or_else(|| {
@@ -370,7 +384,7 @@ mod tests {
     }
 
     #[test]
-    fn resize_angle_overrides_hover_and_clears_on_press() {
+    fn press_keeps_angle_logic_with_glow() {
         let mut anim = CursorAnim::default();
         anim.pointer_hover = true;
         anim.resize_angle = Some(180.0);
@@ -379,10 +393,30 @@ mod tests {
         }
         assert!((anim.angle - 180.0).abs() < 0.1, "边框角度未收敛: {}", anim.angle);
 
+        // 按下不改变角度：仍向边框方向收敛，仅叠加粉色与缩放。
         anim.begin_press();
-        assert_eq!(anim.resize_angle, None);
-        anim.update(1.0 / 60.0, 0.0, 0.0);
-        assert!(anim.angle < 180.0, "按下后未回到默认旋转路径");
+        anim.drag_active = false;
+        for _ in 0..60 {
+            anim.update(1.0 / 60.0, 0.0, 0.0);
+        }
+        assert!(
+            (anim.angle - 180.0).abs() < 0.1,
+            "按下后角度未保持边框方向: {}",
+            anim.angle
+        );
+        assert!(anim.additive_opacity > 0.0, "按下应显示粉色发光");
+        assert!(anim.scale_value < 1.0, "按下应缩小");
+
+        // 开始拖动后由拖动方向接管。
+        anim.drag_active = true;
+        for _ in 0..30 {
+            anim.update(1.0 / 60.0, 40.0, 20.0);
+        }
+        assert!(
+            (anim.angle - 180.0).abs() > 0.5,
+            "拖动应接管角度: {}",
+            anim.angle
+        );
     }
 
     #[test]
