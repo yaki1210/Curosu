@@ -137,7 +137,13 @@ impl Compositor {
     }
 
     /// 合成一帧到缓冲。
-    pub fn draw(&mut self, geom: &CursorGeometry, anim: &CursorAnim, tex: &CursorTextures) {
+    pub fn draw(
+        &mut self,
+        geom: &CursorGeometry,
+        anim: &CursorAnim,
+        tex: &CursorTextures,
+        opacity: f64,
+    ) {
         let margin = geom.window_margin as f32;
         let cw = geom.cursor_width as f32;
         let ch = geom.cursor_height as f32;
@@ -145,6 +151,7 @@ impl Compositor {
         let theta = (anim.angle as f32).to_radians();
         let (sin, cos) = theta.sin_cos();
         let add_op = anim.additive_opacity as f32;
+        let opacity = opacity.clamp(0.0, 1.0) as f32;
 
         // 先清空整块缓冲，再只遍历旋转后光标的包围盒。原实现每帧扫描
         // 160x160 的全部像素，即使绝大多数像素必然透明；这里通常能把
@@ -212,6 +219,18 @@ impl Compositor {
                 ob = ab * ma + ob * (1.0 - ma);
                 oa = ma + oa * (1.0 - ma);
 
+                // 光标素材为大尺寸半透明 PNG。缩小到 16–64px 后，双线性采样会让
+                // 本应清晰的轮廓只剩半透明像素。透明度调到 100% 时，把所有可见
+                // 像素提升为不透明；其余档位平滑过渡，随后再由窗口全局 Alpha 淡出。
+                if oa > f32::EPSILON {
+                    let solid_alpha = oa.powf(1.0 - opacity);
+                    let alpha_scale = solid_alpha / oa;
+                    or *= alpha_scale;
+                    og *= alpha_scale;
+                    ob *= alpha_scale;
+                    oa = solid_alpha;
+                }
+
                 let a = (oa * 255.0).round().clamp(0.0, 255.0) as u32;
                 let r = (or * 255.0).round().clamp(0.0, 255.0) as u32;
                 let g = (og * 255.0).round().clamp(0.0, 255.0) as u32;
@@ -223,7 +242,7 @@ impl Compositor {
     }
 
     /// 把缓冲写入 DIB 并调用 UpdateLayeredWindow 呈现。
-    pub fn present(&mut self, hwnd: HWND) {
+    pub fn present(&mut self, hwnd: HWND, opacity: f64) {
         unsafe {
             if !self.bits.is_null() {
                 std::ptr::copy_nonoverlapping(
@@ -241,7 +260,7 @@ impl Compositor {
             let blend = BLENDFUNCTION {
                 BlendOp: AC_SRC_OVER as u8,
                 BlendFlags: 0,
-                SourceConstantAlpha: 255,
+                SourceConstantAlpha: (opacity.clamp(0.0, 1.0) * 255.0).round() as u8,
                 AlphaFormat: AC_SRC_ALPHA as u8,
             };
             // 先获取窗口当前位置

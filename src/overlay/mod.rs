@@ -60,6 +60,7 @@ struct Overlay {
     compositor: Compositor,
     textures: CursorTextures,
     geom: CursorGeometry,
+    cursor_opacity: f64,
     anim: CursorAnim,
     settings: Arc<Mutex<Settings>>,
     tap: TapPlayer,
@@ -193,9 +194,9 @@ pub fn run(settings: Arc<Mutex<Settings>>, tap: TapPlayer, hover: TapPlayer) {
         };
         RegisterClassW(&wc);
 
-        let geom = {
+        let (geom, cursor_opacity) = {
             let s = settings.lock().unwrap_or_else(|e| e.into_inner());
-            anim::geometry_for_width(s.cursor_width)
+            (anim::geometry_for_width(s.cursor_width), s.cursor_opacity)
         };
         let win_w = geom.window_size.ceil() as i32;
         let win_h = geom.window_size.ceil() as i32;
@@ -233,6 +234,7 @@ pub fn run(settings: Arc<Mutex<Settings>>, tap: TapPlayer, hover: TapPlayer) {
             compositor,
             textures,
             geom,
+            cursor_opacity,
             anim: CursorAnim::default(),
             settings,
             tap,
@@ -789,8 +791,13 @@ impl Overlay {
             self.force_topmost = false;
         }
         if redraw || !self.frame_ready {
-            self.compositor.draw(&pgeom, &self.anim, &self.textures);
-            self.compositor.present(self.hwnd);
+            self.compositor.draw(
+                &pgeom,
+                &self.anim,
+                &self.textures,
+                self.cursor_opacity,
+            );
+            self.compositor.present(self.hwnd, self.cursor_opacity);
             self.frame_ready = true;
         }
     }
@@ -840,6 +847,10 @@ impl Overlay {
         self.hover.set_enabled(s.hover_sound_enabled);
         self.hover.set_volume(s.hover_sound_volume);
         crate::autostart::apply(s.auto_start);
+        if (self.cursor_opacity - s.cursor_opacity).abs() > 0.001 {
+            self.cursor_opacity = s.cursor_opacity;
+            self.frame_ready = false;
+        }
         // 光标尺寸变更
         let g = anim::geometry_for_width(s.cursor_width);
         if (g.cursor_width - self.geom.cursor_width).abs() > 0.001 {
@@ -882,6 +893,7 @@ unsafe fn foreground_window_covers_monitor(
     if hwnd.is_null()
         || IsWindowVisible(hwnd) == 0
         || is_desktop_shell_window(hwnd)
+        || is_windows_screen_capture_overlay(hwnd)
         || is_browser_window(hwnd)
         || matches_fullscreen_exclusion(
             hwnd,
@@ -919,6 +931,15 @@ unsafe fn is_desktop_shell_window(hwnd: HWND) -> bool {
     matches!(
         window_class_name(hwnd).as_deref(),
         Some("Progman") | Some("WorkerW")
+    )
+}
+
+/// Win+Shift+S 的全屏选区由系统截图宿主显示。它不是游戏全屏，因此保持
+/// Curosu 的动画覆盖层，而不是回退到系统鼠标。
+unsafe fn is_windows_screen_capture_overlay(hwnd: HWND) -> bool {
+    matches!(
+        window_executable_name(hwnd).as_deref(),
+        Some("ScreenClippingHost.exe") | Some("SnippingTool.exe")
     )
 }
 

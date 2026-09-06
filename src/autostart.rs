@@ -28,7 +28,9 @@ pub fn apply(enabled: bool) -> bool {
                 RegCloseKey(hkey);
                 return false;
             }
-            let path_wide = path
+            // Run 键的可执行文件路径含空格（Program Files）时必须加引号，
+            // 否则 Windows 会把它解析为 C:\\Program.exe 及其余参数。
+            let command_wide = startup_command(&path)
                 .encode_utf16()
                 .chain(std::iter::once(0))
                 .collect::<Vec<u16>>();
@@ -37,8 +39,8 @@ pub fn apply(enabled: bool) -> bool {
                 value_wide.as_ptr(),
                 0,
                 REG_SZ,
-                path_wide.as_ptr() as *const u8,
-                (path_wide.len() * 2) as u32,
+                command_wide.as_ptr() as *const u8,
+                (command_wide.len() * 2) as u32,
             )
         } else {
             RegDeleteValueW(hkey, value_wide.as_ptr())
@@ -56,4 +58,21 @@ fn startup_path() -> String {
     std::env::current_exe()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default()
+}
+
+fn startup_command(path: &str) -> String {
+    format!("\"{path}\"")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::startup_command;
+
+    #[test]
+    fn startup_command_quotes_paths_with_spaces() {
+        assert_eq!(
+            startup_command(r"C:\Program Files\Curosu\curosu.exe"),
+            r#""C:\Program Files\Curosu\curosu.exe""#
+        );
+    }
 }
